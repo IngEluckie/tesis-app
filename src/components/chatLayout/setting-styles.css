@@ -1,0 +1,311 @@
+/* Estilos internos de la ventana de configuración */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem clamp(1rem, 4vw, 3rem);
+  background: rgba(12, 19, 33, 0.76);
+  backdrop-filter: blur(6px);
+}
+
+.settings-overlay.is-open {
+  display: flex;
+}
+
+.settings-modal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: min(880px, 100%);
+  min-height: clamp(480px, 65vh, 640px);
+  padding: clamp(1.75rem, 2.5vw, 2.5rem) clamp(1.75rem, 2.5vw, 3rem);
+  border-radius: 18px;
+  background: #f6f7fa;
+  color: #1a1e2b;
+  box-shadow:
+    0 24px 48px rgba(9, 12, 19, 0.32),
+    0 0 0 1px rgba(28, 36, 49, 0.05);
+}
+
+.settings-close-btn {
+  position: absolute;
+  top: clamp(1rem, 2vw, 1.5rem);
+  right: clamp(1rem, 2vw, 1.5rem);
+  border: none;
+  background: transparent;
+  font-size: 1.75rem;
+  font-weight: 300;
+  color: #3a4359;
+  cursor: pointer;
+}
+
+.settings-close-btn:hover,
+.settings-close-btn:focus {
+  color: #121722;
+}
+
+.settings-header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: clamp(1.5rem, 3vw, 2.5rem);
+  align-items: start;
+}
+
+.settings-avatar-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.settings-avatar {
+  position: relative;
+  width: clamp(120px, 18vw, 148px);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  border: 4px solid #d9deeb;
+  overflow: hidden;
+  background: linear-gradient(135deg, #cfd6ec, #eef2fb);
+  display: grid;
+  place-items: center;
+}
+
+.settings-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.settings-avatar-status {
+  position: absolute;
+  right: 6%;
+  bottom: 12%;
+  width: clamp(18px, 3vw, 22px);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  border: 3px solid #f6f7fa;
+  background: #2ec36b;
+  box-shadow: 0 4px 12px rgba(46, 195, 107, 0.4);
+}
+
+.settings-edit-avatar-btn {
+  padding: 0.45rem 1.15rem;
+  border-radius: 999px;
+  border: 1px solid #c4cbe0;
+  background: linear-gradient(180deg, #f4f6fb 0%, #e6ebf5 100%);
+  color: #2d3553;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-edit-avatar-btn:hover,
+.settings-edit-avatar-btn:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(32, 45, 78, 0.18);
+}
+
+.settings-primary-controls {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2vw, 1.75rem);
+}
+
+.settings-username-label {
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b748c;
+}
+
+.settings-username-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.settings-username-input {
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid #d0d7ea;
+  background: #ffffff;
+  box-shadow: inset 0 1px 3px rgba(19, 23, 37, 0.08);
+  font-size: 1rem;
+  color: #1a1e2b;
+  letter-spacing: 0.01em;
+}
+
+.settings-username-input:focus {
+  outline: none;
+  border-color: #9fb0da;
+  box-shadow: 0 0 0 3px rgba(159, 176, 218, 0.35);
+}
+
+.settings-username-action {
+  padding: 0.7rem 1.45rem;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(180deg, #dce3f7 0%, #c2cce8 100%);
+  color: #1f2740;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 12px 24px rgba(35, 46, 74, 0.18);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-username-action:hover,
+.settings-username-action:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 32px rgba(35, 46, 74, 0.22);
+}
+
+.settings-theme-row {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  font-size: 1rem;
+  color: #1f2740;
+}
+
+.settings-theme-label {
+  font-weight: 600;
+}
+
+.settings-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.65rem 0.35rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid #cbd3ea;
+  background: #eef1fb;
+  color: #545f7a;
+  cursor: pointer;
+}
+
+.settings-theme-toggle__track {
+  position: relative;
+  width: 44px;
+  height: 22px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #d7dff3 0%, #c3cbe4 100%);
+}
+
+.settings-theme-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(18, 23, 38, 0.18);
+}
+
+.settings-theme-toggle__state {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.settings-theme-mode {
+  font-weight: 500;
+  color: #7b859f;
+  letter-spacing: 0.05em;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+}
+
+.settings-status-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #47506a;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-status-wrapper {
+  flex: 1;
+  border-radius: 18px;
+  border: 1px solid #d0d7ea;
+  background: #ffffff;
+  box-shadow: inset 0 1px 2px rgba(19, 23, 37, 0.08);
+  padding: clamp(1rem, 2vw, 1.5rem);
+  display: flex;
+}
+
+.settings-status-input {
+  width: 100%;
+  min-height: clamp(180px, 30vh, 260px);
+  border: none;
+  resize: none;
+  background: transparent;
+  color: #526085;
+  font-size: 1.1rem;
+  line-height: 1.6;
+  letter-spacing: 0.01em;
+  font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.settings-status-input::placeholder {
+  color: rgba(82, 96, 133, 0.4);
+}
+
+.settings-status-input:focus {
+  outline: none;
+}
+
+.settings-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.settings-save-status-btn {
+  padding: 0.85rem 1.9rem;
+  border-radius: 12px;
+  border: none;
+  background: linear-gradient(180deg, #202a44 0%, #10182c 100%);
+  color: #f0f3fc;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  box-shadow: 0 16px 32px rgba(16, 24, 44, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-save-status-btn:hover,
+.settings-save-status-btn:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 22px 40px rgba(16, 24, 44, 0.45);
+}
+
+@media (max-width: 768px) {
+  .settings-modal {
+    gap: 1.25rem;
+  }
+
+  .settings-header {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .settings-username-row {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-footer {
+    justify-content: center;
+  }
+}
