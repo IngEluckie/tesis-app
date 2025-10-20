@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import os
 
 # Import modules
-from routers import auth, websocket
+from routers import auth, websocket, chats
 from database.singleton import Database
 
 # Start server
@@ -17,10 +17,11 @@ app: FastAPI = FastAPI()
 # Add routers
 app.include_router(auth.router_authentication)
 app.include_router(websocket.router_websockets)
+app.include_router(chats.router_chats)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000",],
     allow_credentials= True,
     allow_methods=["*"],
     allow_headers=["*"],
