@@ -10,19 +10,22 @@ const ChatButton = ({
   ...buttonProps
 }) => {
   const imageSrc = avatarUrl || fallbackAvatarUrl;
+  const label = username || 'Chat';
 
   return (
     <button
       type="button"
       className={`chat-button ${className}`}
+      title={label}
+      aria-label={label}
       {...buttonProps}
     >
       <img
         src={imageSrc}
-        alt={`${username} avatar`}
+        alt={`${label} avatar`}
         className="chat-button__avatar"
       />
-      <span className="chat-button__username">{username}</span>
+      <span className="chat-button__username">{label}</span>
     </button>
   );
 };

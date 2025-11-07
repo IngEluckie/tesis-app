@@ -30,6 +30,66 @@ const normalizeBackendBase = (value) => {
   return withProtocol.replace(/\/+$/, '');
 };
 
+const ATTACHMENT_ID_KEYS = [
+  'attachment_id',
+  'id',
+  'uuid',
+  'file_id',
+  'attachmentId',
+  'attachmentID',
+];
+
+const toAttachmentId = (attachment) => {
+  if (!attachment || typeof attachment !== 'object') {
+    return null;
+  }
+  for (const key of ATTACHMENT_ID_KEYS) {
+    if (attachment[key] !== undefined && attachment[key] !== null) {
+      return attachment[key];
+    }
+  }
+  return null;
+};
+
+const toAttachmentKey = (attachment) => {
+  const id = toAttachmentId(attachment);
+  if (id === null || id === undefined) {
+    return `tmp:${JSON.stringify(attachment)}`;
+  }
+  return `id:${String(id)}`;
+};
+
+const mergeAttachmentLists = (current = [], incoming = []) => {
+  const map = new Map();
+  const append = (attachment) => {
+    if (!attachment || typeof attachment !== 'object') {
+      return;
+    }
+    const key = toAttachmentKey(attachment);
+    const existing = map.get(key);
+    map.set(
+      key,
+      existing ? { ...existing, ...attachment } : { ...attachment }
+    );
+  };
+  (Array.isArray(current) ? current : []).forEach(append);
+  (Array.isArray(incoming) ? incoming : []).forEach(append);
+  return Array.from(map.values());
+};
+
+const normalizeAttachments = (raw) => {
+  if (!raw || typeof raw !== 'object') {
+    return [];
+  }
+  const fromArray = Array.isArray(raw.attachments) ? raw.attachments : [];
+  const single = raw.attachment
+    ? Array.isArray(raw.attachment)
+      ? raw.attachment
+      : [raw.attachment]
+    : [];
+  return mergeAttachmentLists(fromArray, single);
+};
+
 const normalizeMessageRecord = (raw) => {
   if (!raw || typeof raw !== 'object') {
     return null;
@@ -45,6 +105,30 @@ const normalizeMessageRecord = (raw) => {
   return {
     ...raw,
     message_id: messageId,
+    attachments: normalizeAttachments(raw),
+  };
+};
+
+const mergeMessageRecords = (current, incoming) => {
+  if (!current && !incoming) {
+    return null;
+  }
+  if (!current) {
+    return {
+      ...incoming,
+      attachments: mergeAttachmentLists([], incoming?.attachments),
+    };
+  }
+  if (!incoming) {
+    return {
+      ...current,
+      attachments: mergeAttachmentLists(current.attachments, []),
+    };
+  }
+  return {
+    ...current,
+    ...incoming,
+    attachments: mergeAttachmentLists(current.attachments, incoming.attachments),
   };
 };
 
@@ -120,6 +204,31 @@ export const Chat = () => {
     () => normalizeBackendBase(browserUrl),
     [browserUrl]
   );
+
+  const upsertMessage = useCallback((incoming) => {
+    if (!incoming || typeof incoming !== 'object') {
+      return;
+    }
+    setMessages((prev) => {
+      const messageId = incoming.message_id ?? null;
+      if (!messageId) {
+        return [...prev, incoming];
+      }
+      const index = prev.findIndex(
+        (msg) =>
+          msg &&
+          typeof msg === 'object' &&
+          msg.message_id &&
+          msg.message_id === messageId
+      );
+      if (index === -1) {
+        return [...prev, incoming];
+      }
+      const next = [...prev];
+      next[index] = mergeMessageRecords(prev[index], incoming);
+      return next;
+    });
+  }, []);
 
   const resetHistoryState = useCallback(() => {
     if (abortControllerRef.current) {
@@ -213,18 +322,40 @@ export const Chat = () => {
           if (isReplace) {
             return normalizedMessages;
           }
-          if (isPrepend) {
-            const existingIds = new Set(prev.map((msg) => msg.message_id));
-            const merged = normalizedMessages.filter(
-              (msg) => !existingIds.has(msg.message_id)
-            );
-            return [...merged, ...prev];
+
+          const next = [...prev];
+          const indexById = new Map();
+          next.forEach((msg, index) => {
+            if (msg && typeof msg === 'object' && msg.message_id) {
+              indexById.set(msg.message_id, index);
+            }
+          });
+
+          const freshMessages = [];
+
+          normalizedMessages.forEach((msg) => {
+            if (!msg || typeof msg !== 'object') {
+              return;
+            }
+            const { message_id: msgId } = msg;
+            if (msgId && indexById.has(msgId)) {
+              const targetIndex = indexById.get(msgId);
+              next[targetIndex] = mergeMessageRecords(next[targetIndex], msg);
+            } else if (isPrepend) {
+              freshMessages.push(msg);
+            } else {
+              next.push(msg);
+              if (msgId) {
+                indexById.set(msgId, next.length - 1);
+              }
+            }
+          });
+
+          if (!isPrepend || freshMessages.length === 0) {
+            return next;
           }
-          const existingIds = new Set(prev.map((msg) => msg.message_id));
-          const merged = normalizedMessages.filter(
-            (msg) => !existingIds.has(msg.message_id)
-          );
-          return [...prev, ...merged];
+
+          return [...freshMessages, ...next];
         });
 
         setHistoryCursor(nextCursor);
@@ -312,18 +443,7 @@ export const Chat = () => {
 
         const normalized = normalizeMessageRecord(payload);
         if (normalized && activeChatIdRef.current === activeChat.id) {
-          setMessages((prev) => {
-            const exists = prev.some(
-              (msg) =>
-                msg.message_id &&
-                normalized.message_id &&
-                msg.message_id === normalized.message_id
-            );
-            if (exists) {
-              return prev;
-            }
-            return [...prev, normalized];
-          });
+          upsertMessage(normalized);
         }
 
         return { ok: true };
@@ -331,7 +451,155 @@ export const Chat = () => {
         return { ok: false, error: error?.message || 'Error al enviar mensaje' };
       }
     },
-    [activeChat, backendBaseUrl, jwt]
+    [activeChat, backendBaseUrl, jwt, upsertMessage]
+  );
+
+  const handleUploadAttachment = useCallback(
+    async (file) => {
+      if (!jwt || !activeChat || !activeChat.id || !file) {
+        return { ok: false, error: 'Archivo no válido' };
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const response = await fetch(
+          `${backendBaseUrl}/files/chats/${encodeURIComponent(
+            activeChat.id
+          )}/attachments`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${jwt}`,
+            },
+            credentials: 'include',
+            body: formData,
+          }
+        );
+
+        let payload = null;
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('application/json')) {
+          payload = await response.json().catch(() => ({}));
+        } else {
+          const text = await response.text().catch(() => '');
+          try {
+            payload = JSON.parse(text);
+          } catch (_) {
+            payload = { detail: text };
+          }
+        }
+
+        if (!response.ok) {
+          let errorMessage =
+            payload?.detail ||
+            payload?.error ||
+            `No se pudo subir el archivo (HTTP ${response.status})`;
+          if (response.status === 413) {
+            errorMessage = 'El archivo excede el tamaño máximo permitido.';
+          } else if (response.status === 400) {
+            errorMessage =
+              payload?.detail ||
+              payload?.error ||
+              'Formato de archivo no permitido.';
+          }
+          return { ok: false, error: errorMessage };
+        }
+
+        const messageRecord = payload?.message ?? payload;
+        let normalized = normalizeMessageRecord(messageRecord);
+        if (normalized && payload?.attachment) {
+          normalized = {
+            ...normalized,
+            attachments: mergeAttachmentLists(normalized.attachments, [
+              payload.attachment,
+            ]),
+          };
+        }
+
+        if (normalized && activeChatIdRef.current === activeChat.id) {
+          upsertMessage(normalized);
+        }
+
+        return { ok: true, message: normalized };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error?.message || 'No se pudo subir el archivo.',
+        };
+      }
+    },
+    [activeChat, backendBaseUrl, jwt, upsertMessage]
+  );
+
+  const handleDownloadAttachment = useCallback(
+    async (attachment) => {
+      if (!jwt || !attachment || typeof attachment !== 'object') {
+        return { ok: false, error: 'Adjunto no disponible' };
+      }
+
+      const attachmentId = toAttachmentId(attachment);
+      if (attachmentId === null || attachmentId === undefined) {
+        return { ok: false, error: 'Adjunto no válido' };
+      }
+
+      if (typeof window === 'undefined') {
+        return {
+          ok: false,
+          error: 'La descarga sólo está disponible en el navegador.',
+        };
+      }
+
+      try {
+        const response = await fetch(
+          `${backendBaseUrl}/files/attachments/${encodeURIComponent(
+            attachmentId
+          )}/download`,
+          {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${jwt}`,
+            },
+            credentials: 'include',
+          }
+        );
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          const errorMessage =
+            payload?.detail ||
+            payload?.error ||
+            `No fue posible descargar el archivo (HTTP ${response.status})`;
+          return { ok: false, error: errorMessage };
+        }
+
+        const blob = await response.blob();
+        const fileName =
+          attachment.original_name ||
+          attachment.file_name ||
+          `archivo-${attachmentId}`;
+
+        const blobUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.setTimeout(() => window.URL.revokeObjectURL(blobUrl), 0);
+
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error:
+            error?.message || 'No fue posible descargar el archivo en este momento.',
+        };
+      }
+    },
+    [backendBaseUrl, jwt]
   );
 
   useEffect(() => {
@@ -470,18 +738,8 @@ export const Chat = () => {
       return;
     }
 
-    setMessages((prev) => {
-      const exists = prev.some(
-        (msg) => msg.message_id && msg.message_id === normalized.message_id
-      );
-      if (exists) {
-        return prev.map((msg) =>
-          msg.message_id === normalized.message_id ? { ...msg, ...normalized } : msg
-        );
-      }
-      return [...prev, normalized];
-    });
-  }, [activeChat, websocketLastMessage]);
+    upsertMessage(normalized);
+  }, [activeChat, upsertMessage, websocketLastMessage]);
 
   useEffect(() => {
     return () => {
@@ -515,6 +773,8 @@ export const Chat = () => {
             error={historyError}
             onLoadMore={handleLoadOlderMessages}
             onSendMessage={handleSendMessage}
+            onUploadAttachment={handleUploadAttachment}
+            onDownloadAttachment={handleDownloadAttachment}
             websocketStatus={websocketStatus}
           />
         ) : (
