@@ -46,15 +46,24 @@ export const AuthGate = ({ children }) => {
         return;
       }
       setUserData((prev) => {
-        if (!prev || (!prev.avatarUrl && !prev.avatarMimeType)) {
+        if (!prev) {
           return prev;
         }
         const next = { ...prev };
-        delete next.avatarUrl;
+        let changed = false;
+        if ('avatarUrl' in next) {
+          delete next.avatarUrl;
+          changed = true;
+        }
         if ('avatarMimeType' in next) {
           delete next.avatarMimeType;
+          changed = true;
         }
-        return next;
+        if (Object.prototype.hasOwnProperty.call(next, 'profile_image')) {
+          next.profile_image = null;
+          changed = true;
+        }
+        return changed ? next : prev;
       });
     };
 
@@ -194,17 +203,22 @@ export const AuthGate = ({ children }) => {
           try {
             data = await res.json();
             if (!isCancelled && data) {
-              setUserData(data);
+              setUserData((prev) => ({
+                ...(prev || {}),
+                ...data,
+              }));
             }
           } catch (parseError) {
             console.warn('Failed to parse auth/me payload:', parseError);
           }
 
           if (!isCancelled) {
-            if (data && data.profile_image) {
-              loadAvatar(defaultBase, jwt);
-            } else if (data) {
+            const hasProfileImageField =
+              data && Object.prototype.hasOwnProperty.call(data, 'profile_image');
+            if (hasProfileImageField && !data.profile_image) {
               clearAvatarInState();
+            } else {
+              loadAvatar(defaultBase, jwt);
             }
           }
 

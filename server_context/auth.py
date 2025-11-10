@@ -57,7 +57,6 @@ class User(BaseModel):
     username: str
     name: str | None
     email: str | None
-    profile_image: str | None = None
 
 class UserPrivate(User):
     password: str
@@ -87,7 +86,6 @@ def search_user_private(username: str):
             username=user_db["username"],
             name=user_db["NombreCompleto"],
             email=user_db["email"],
-            profile_image=user_db.get("Foto_perfil"),
             password=user_db["Password"],
             typeUser=user_db["Tipo_usuario"],
         )
@@ -107,8 +105,7 @@ def search_user(user_iD: int):
             user_id=user_db["Id_Usuarios"],
             username=user_db["username"],
             name=user_db["NombreCompleto"],
-            email=user_db["email"],
-            profile_image=user_db.get("Foto_perfil"),
+            email=user_db["email"]
         )
     except Exception as e:
         print(f"Error en search_user: {e}")
@@ -200,7 +197,6 @@ async def getUserInfo(
             username=userInfo["username"],
             name=userInfo["NombreCompleto"],
             email=userInfo["email"],
-            profile_image=userInfo.get("Foto_perfil"),
         )
     except Exception as e:
         raise Exception

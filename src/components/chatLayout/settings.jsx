@@ -13,7 +13,9 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
   const avatarUrl = userData?.avatarUrl || defaultUser;
 
   const [uploadError, setUploadError] = useState('');
+  const [actionNotice, setActionNotice] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fileInputRef = useRef(null);
   const uploadAbortRef = useRef(null);
@@ -73,6 +75,7 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
           next.profile_image = null;
           return next;
         });
+        setActionNotice('');
         return;
       }
 
@@ -91,6 +94,7 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
           delete next.avatarMimeType;
           return next;
         });
+        setActionNotice('');
         return;
       }
 
@@ -130,6 +134,7 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
       }
       console.warn('No fue posible recuperar el avatar actualizado:', error);
       setUploadError('No fue posible cargar la imagen actualizada. Intenta recargar la página.');
+      setActionNotice('');
     } finally {
       if (uploadAbortRef.current === controller) {
         uploadAbortRef.current = null;
@@ -138,15 +143,20 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
   }, [backendBaseUrl, jwt, setUserData]);
 
   const handleEditAvatar = useCallback(() => {
+    if (isUploading || isDeleting) {
+      return;
+    }
     if (!jwt) {
       setUploadError('Debes iniciar sesión para actualizar tu imagen.');
+      setActionNotice('');
       return;
     }
     setUploadError('');
+    setActionNotice('');
     if (fileInputRef.current) {
       fileInputRef.current.click();
     }
-  }, [jwt]);
+  }, [isDeleting, isUploading, jwt]);
 
   const handleFileChange = useCallback(
     async (event) => {
@@ -155,7 +165,13 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
         return;
       }
 
+      if (isDeleting) {
+        resetInput();
+        return;
+      }
+
       setUploadError('');
+      setActionNotice('');
 
       if (!file.type || !file.type.startsWith('image/')) {
         setUploadError('Selecciona un archivo de imagen válido.');
@@ -222,12 +238,14 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
         }
 
         await updateAvatarFromServer();
+        setActionNotice('Imagen de perfil actualizada.');
       } catch (error) {
         if (error?.name === 'AbortError') {
           return;
         }
         console.warn('Fallo al subir la nueva imagen de perfil:', error);
         setUploadError(error?.message || 'No fue posible subir tu imagen.');
+        setActionNotice('');
       } finally {
         setIsUploading(false);
         resetInput();
@@ -236,8 +254,97 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
         }
       }
     },
-    [backendBaseUrl, clearPreviousUpload, jwt, resetInput, setUserData, updateAvatarFromServer]
+    [backendBaseUrl, clearPreviousUpload, isDeleting, jwt, resetInput, setUserData, updateAvatarFromServer]
   );
+
+  const handleDeleteAvatar = useCallback(async () => {
+    if (isDeleting || isUploading) {
+      return;
+    }
+    if (!jwt) {
+      setUploadError('Debes iniciar sesión para eliminar tu imagen.');
+      setActionNotice('');
+      return;
+    }
+
+    clearPreviousUpload();
+    setUploadError('');
+    setActionNotice('');
+    resetInput();
+
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
+    setIsDeleting(true);
+
+    const applyRemovalState = () => {
+      setUserData((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const base = { ...prev };
+        if ('avatarUrl' in base) {
+          delete base.avatarUrl;
+        }
+        if ('avatarMimeType' in base) {
+          delete base.avatarMimeType;
+        }
+        base.profile_image = null;
+        return base;
+      });
+    };
+
+    try {
+      const response = await fetch(`${backendBaseUrl}/users/me/avatar`, {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${jwt}`,
+        },
+        credentials: 'include',
+        signal: controller.signal,
+      });
+
+      if (response.status === 404) {
+        applyRemovalState();
+        setActionNotice('No tienes una imagen de perfil configurada.');
+        return;
+      }
+
+      if (!response.ok) {
+        let detail = `No se pudo eliminar la imagen (HTTP ${response.status}).`;
+        try {
+          const payload = await response.json();
+          detail = payload?.detail || detail;
+        } catch (readError) {
+          console.warn('No se pudo leer el error de eliminación de avatar:', readError);
+        }
+        throw new Error(detail);
+      }
+
+      applyRemovalState();
+      setActionNotice('Imagen de perfil eliminada.');
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        return;
+      }
+      console.warn('Fallo al eliminar la imagen de perfil:', error);
+      setUploadError(error?.message || 'No fue posible eliminar la imagen.');
+      setActionNotice('');
+    } finally {
+      setIsDeleting(false);
+      if (uploadAbortRef.current === controller) {
+        uploadAbortRef.current = null;
+      }
+    }
+  }, [
+    backendBaseUrl,
+    clearPreviousUpload,
+    isDeleting,
+    isUploading,
+    jwt,
+    resetInput,
+    setUserData,
+  ]);
 
   return (
     <div
@@ -263,14 +370,24 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
               <img src={avatarUrl} alt={`Foto de perfil de ${username}`} />
               <span className="settings-avatar-status" aria-hidden="true" />
             </div>
-            <button
-              type="button"
-              className="settings-edit-avatar-btn"
-              onClick={handleEditAvatar}
-              disabled={isUploading}
-            >
-              {isUploading ? 'Subiendo…' : 'Editar imagen'}
-            </button>
+            <div className="settings-avatar-actions">
+              <button
+                type="button"
+                className="settings-edit-avatar-btn"
+                onClick={handleEditAvatar}
+                disabled={isUploading || isDeleting}
+              >
+                {isUploading ? 'Subiendo…' : 'Cambiar imagen'}
+              </button>
+              <button
+                type="button"
+                className="settings-delete-avatar-btn"
+                onClick={handleDeleteAvatar}
+                disabled={isDeleting || isUploading}
+              >
+                {isDeleting ? 'Eliminando…' : 'Eliminar imagen'}
+              </button>
+            </div>
             <input
               ref={fileInputRef}
               className="settings-avatar-input"
@@ -278,7 +395,9 @@ export const Settings = ({ isOpen = false, onClose = () => {} }) => {
               accept="image/*"
               onChange={handleFileChange}
               style={{ display: 'none' }}
+              disabled={isDeleting}
             />
+            {actionNotice && <p className="settings-avatar-notice">{actionNotice}</p>}
             {uploadError && <p className="settings-avatar-error">{uploadError}</p>}
           </div>
 

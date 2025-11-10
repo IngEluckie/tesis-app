@@ -92,6 +92,14 @@
   box-shadow: 0 4px 12px rgba(46, 195, 107, 0.4);
 }
 
+.settings-avatar-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  width: 100%;
+}
+
 .settings-edit-avatar-btn {
   padding: 0.45rem 1.15rem;
   border-radius: 999px;
@@ -108,6 +116,47 @@
 .settings-edit-avatar-btn:focus {
   transform: translateY(-1px);
   box-shadow: 0 6px 16px rgba(32, 45, 78, 0.18);
+}
+
+.settings-edit-avatar-btn:disabled,
+.settings-delete-avatar-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.settings-delete-avatar-btn {
+  padding: 0.45rem 1.15rem;
+  border-radius: 999px;
+  border: 1px solid #f3c5c5;
+  background: linear-gradient(180deg, #fdeaea 0%, #f7d4d4 100%);
+  color: #8c1f1f;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-delete-avatar-btn:hover,
+.settings-delete-avatar-btn:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(140, 31, 31, 0.18);
+}
+
+.settings-avatar-error,
+.settings-avatar-notice {
+  margin: 0;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.settings-avatar-error {
+  color: #c24040;
+}
+
+.settings-avatar-notice {
+  color: #1f7a4d;
 }
 
 .settings-primary-controls {
