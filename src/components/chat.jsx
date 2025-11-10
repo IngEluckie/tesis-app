@@ -397,6 +397,65 @@ export const Chat = () => {
     [fetchChatMessages, resetHistoryState]
   );
 
+  const handleOpenChatByUsername = useCallback(
+    async (username) => {
+      const target = (username || '').trim();
+      if (!target || !jwt) {
+        return;
+      }
+
+      const params = new URLSearchParams();
+      params.set('limit', String(DEFAULT_MESSAGES_LIMIT));
+
+      try {
+        setHistoryError(null);
+
+        const response = await fetch(
+          `${backendBaseUrl}/chats/open_single_chat/${encodeURIComponent(
+            target
+          )}?${params.toString()}`,
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${jwt}`,
+            },
+            credentials: 'include',
+          }
+        );
+
+        const payload = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          const detail =
+            payload?.detail ||
+            payload?.error ||
+            `No fue posible abrir la conversación (HTTP ${response.status})`;
+          throw new Error(detail);
+        }
+
+        const chatId = payload?.chat_id ?? payload?.chatId;
+        if (!chatId) {
+          throw new Error(
+            'La respuesta del servidor no incluyó el identificador del chat.'
+          );
+        }
+
+        handleSelectChat({
+          id: chatId,
+          name: target,
+          isGroup: false,
+        });
+      } catch (error) {
+        console.error('No se pudo abrir el chat individual:', error);
+        setHistoryError(
+          error?.message || 'No fue posible abrir la conversación'
+        );
+      }
+    },
+    [backendBaseUrl, handleSelectChat, jwt]
+  );
+
   const handleLoadOlderMessages = useCallback(() => {
     if (!activeChat || !historyCursor || isHistoryLoadingMore) {
       return;
@@ -757,7 +816,10 @@ export const Chat = () => {
   return (
     <div className="chat-page">
       <div className="nava">
-        <Navbar onOpenSettings={() => setIsSettingsOpen(true)} />
+        <Navbar
+          onSearch={handleOpenChatByUsername}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
       </div>
       <div className="main-container">
         <Chatsbar className="chats-bar" onSelectChat={handleSelectChat} />
