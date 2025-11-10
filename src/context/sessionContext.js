@@ -85,10 +85,26 @@ export const SessionProvider = ({ children }) => {
   const websocketAttemptRef = useRef(0);
   const isMountedRef = useRef(true);
   const jwtRef = useRef(jwt);
+  const avatarObjectUrlRef = useRef(null);
 
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const currentUrl = avatarObjectUrlRef.current;
+      if (!currentUrl || typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') {
+        return;
+      }
+      try {
+        URL.revokeObjectURL(currentUrl);
+      } catch (error) {
+        console.warn('Failed to revoke avatar URL during cleanup:', error);
+      }
+      avatarObjectUrlRef.current = null;
     };
   }, []);
 
@@ -120,17 +136,72 @@ export const SessionProvider = ({ children }) => {
     jwtRef.current = nextValue;
   }, []);
 
-  const setUserData = useCallback((value) => {
-    if (!storage) {
-      setUserDataState(value || null);
-      return;
-    }
-    if (value) {
-      storage.setItem('userdata', JSON.stringify(value));
-    } else {
-      storage.removeItem('userdata');
-    }
-    setUserDataState(value || null);
+  const setUserData = useCallback((valueOrUpdater) => {
+    setUserDataState((previous) => {
+      const nextValueRaw =
+        typeof valueOrUpdater === 'function' ? valueOrUpdater(previous) : valueOrUpdater;
+
+      if (!nextValueRaw) {
+        if (storage) {
+          storage.removeItem('userdata');
+        }
+        const currentObjectUrl = avatarObjectUrlRef.current;
+        if (currentObjectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+          try {
+            URL.revokeObjectURL(currentObjectUrl);
+          } catch (error) {
+            console.warn('Failed to revoke previous avatar URL:', error);
+          }
+        }
+        avatarObjectUrlRef.current = null;
+        return null;
+      }
+
+      const normalized = { ...nextValueRaw };
+      const avatarUrl = typeof normalized.avatarUrl === 'string' ? normalized.avatarUrl : null;
+
+      const persistable = { ...normalized };
+      if (avatarUrl) {
+        const lower = avatarUrl.toLowerCase();
+        const isObjectUrl = lower.startsWith('blob:');
+        const isDataUrl = lower.startsWith('data:');
+        if (isObjectUrl || isDataUrl) {
+          delete persistable.avatarUrl;
+        }
+      } else {
+        delete persistable.avatarUrl;
+      }
+
+      if (storage) {
+        try {
+          storage.setItem('userdata', JSON.stringify(persistable));
+        } catch (error) {
+          console.warn('Failed to persist userdata:', error);
+        }
+      }
+
+      const currentObjectUrl = avatarObjectUrlRef.current;
+      if (
+        currentObjectUrl &&
+        currentObjectUrl !== avatarUrl &&
+        typeof URL !== 'undefined' &&
+        typeof URL.revokeObjectURL === 'function'
+      ) {
+        try {
+          URL.revokeObjectURL(currentObjectUrl);
+        } catch (error) {
+          console.warn('Failed to revoke previous avatar URL:', error);
+        }
+      }
+
+      if (avatarUrl && avatarUrl.toLowerCase().startsWith('blob:')) {
+        avatarObjectUrlRef.current = avatarUrl;
+      } else {
+        avatarObjectUrlRef.current = null;
+      }
+
+      return normalized;
+    });
   }, []);
 
   useEffect(() => {

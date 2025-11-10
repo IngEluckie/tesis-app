@@ -1,12 +1,13 @@
 import React from 'react';
 import { useSession } from '../../context/sessionContext';
 import './setting-styles.css';
+import defaultUser from '../icons/default_user.png';
 
 export const Settings = ({ isOpen = false, onClose = () => {} }) => {
   const { userData } = useSession();
   const username = userData?.username || 'Invitado';
   const status = userData?.status || 'Normal';
-  const avatarUrl = userData?.avatarUrl || '/img/avatar-placeholder.png';
+  const avatarUrl = userData?.avatarUrl || defaultUser;
 
   const overlayClassName = `settings-overlay${isOpen ? ' is-open' : ''}`;
 
