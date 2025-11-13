@@ -445,6 +445,7 @@ export const Chat = () => {
           id: chatId,
           name: target,
           isGroup: false,
+          contactUsername: target,
         });
       } catch (error) {
         console.error('No se pudo abrir el chat individual:', error);

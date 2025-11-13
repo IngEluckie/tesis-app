@@ -4,27 +4,75 @@ import { fetchAvatarBlob, normalizeBackendBase } from '../services/avatarService
 
 const objectUrlCache = new Map();
 
-const buildCacheKey = ({ self, userId }) => {
+const getCachedUrl = (cacheKey) => {
+  if (!cacheKey) {
+    return null;
+  }
+  const entry = objectUrlCache.get(cacheKey);
+  return entry ? entry.url : null;
+};
+
+const setCachedUrl = (cacheKey, url, { fromObjectUrl = false } = {}) => {
+  if (!cacheKey || !url) {
+    return;
+  }
+  const previous = objectUrlCache.get(cacheKey);
+  if (previous && previous.url === url) {
+    if (fromObjectUrl && !previous.fromObjectUrl) {
+      objectUrlCache.set(cacheKey, { url, fromObjectUrl });
+    }
+    return;
+  }
+  if (previous && previous.fromObjectUrl && previous.url && previous.url !== url) {
+    revokeObjectUrl(previous.url);
+  }
+  objectUrlCache.set(cacheKey, { url, fromObjectUrl });
+};
+
+const clearCachedUrl = (cacheKey) => {
+  if (!cacheKey) {
+    return;
+  }
+  const entry = objectUrlCache.get(cacheKey);
+  if (entry && entry.fromObjectUrl && entry.url) {
+    revokeObjectUrl(entry.url);
+  }
+  objectUrlCache.delete(cacheKey);
+};
+
+const normalizeUsername = (value) => {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim();
+};
+
+const buildCacheKey = ({ self, userId, username }) => {
   if (self) {
     return 'self';
   }
   if (userId === null || userId === undefined) {
-    return null;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) {
+      return null;
+    }
+    return `username:${normalizedUsername.toLowerCase()}`;
   }
   return `user:${userId}`;
 };
 
-const revokeObjectUrl = (url) => {
+function revokeObjectUrl(url) {
   if (!url) {
     return;
   }
   URL.revokeObjectURL(url);
-};
+}
 
 const isAbsoluteUrl = (value) => /^https?:\/\//i.test(value);
 
 export const useAvatarImage = ({
   userId = null,
+  username = null,
   fetchSelf = false,
   initialUrl = null,
   skip = false,
@@ -35,11 +83,13 @@ export const useAvatarImage = ({
   const [error, setError] = useState(null);
 
   const abortRef = useRef(null);
-  const localUrlRef = useRef(null);
   const lastInitialUrlRef = useRef(initialUrl);
 
   const baseUrl = useMemo(() => normalizeBackendBase(browserUrl), [browserUrl]);
-  const cacheKey = useMemo(() => buildCacheKey({ self: fetchSelf, userId }), [fetchSelf, userId]);
+  const cacheKey = useMemo(
+    () => buildCacheKey({ self: fetchSelf, userId, username }),
+    [fetchSelf, userId, username]
+  );
 
   const directAbsoluteUrl = useMemo(() => {
     const raw = typeof initialUrl === 'string' ? initialUrl.trim() : '';
@@ -71,18 +121,7 @@ export const useAvatarImage = ({
     if (initialUrl !== lastInitialUrlRef.current) {
       lastInitialUrlRef.current = initialUrl;
 
-      if (localUrlRef.current) {
-        revokeObjectUrl(localUrlRef.current);
-        localUrlRef.current = null;
-      }
-
-      if (cacheKey) {
-        const cached = objectUrlCache.get(cacheKey);
-        if (cached) {
-          revokeObjectUrl(cached);
-          objectUrlCache.delete(cacheKey);
-        }
-      }
+      clearCachedUrl(cacheKey);
 
       setObjectUrl(null);
       if (!skip) {
@@ -103,7 +142,12 @@ export const useAvatarImage = ({
       return;
     }
 
-    if (!fetchSelf && (userId === null || userId === undefined)) {
+    const normalizedUsername = normalizeUsername(username);
+    if (
+      !fetchSelf &&
+      (userId === null || userId === undefined) &&
+      !normalizedUsername
+    ) {
       return;
     }
 
@@ -112,7 +156,7 @@ export const useAvatarImage = ({
     }
 
     if (status !== 'reload' && cacheKey) {
-      const cachedUrl = objectUrlCache.get(cacheKey);
+      const cachedUrl = getCachedUrl(cacheKey);
       if (cachedUrl) {
         setObjectUrl(cachedUrl);
         setStatus('loaded');
@@ -135,6 +179,7 @@ export const useAvatarImage = ({
           signal: controller.signal,
           self: fetchSelf,
           userId,
+          username: normalizeUsername(username),
         });
 
         if (!isActive) {
@@ -145,26 +190,13 @@ export const useAvatarImage = ({
           if (result.status === 404) {
             setObjectUrl(null);
             setStatus('not-found');
-            if (cacheKey) {
-              objectUrlCache.delete(cacheKey);
-            }
+            clearCachedUrl(cacheKey);
           }
           return;
         }
 
         const newObjectUrl = URL.createObjectURL(result.blob);
-        if (cacheKey) {
-          const existingUrl = objectUrlCache.get(cacheKey);
-          if (existingUrl && existingUrl !== newObjectUrl) {
-            revokeObjectUrl(existingUrl);
-          }
-          objectUrlCache.set(cacheKey, newObjectUrl);
-        }
-
-        if (localUrlRef.current && localUrlRef.current !== newObjectUrl) {
-          revokeObjectUrl(localUrlRef.current);
-        }
-        localUrlRef.current = newObjectUrl;
+        setCachedUrl(cacheKey, newObjectUrl, { fromObjectUrl: true });
         setObjectUrl(newObjectUrl);
         setStatus('loaded');
         setError(null);
@@ -189,7 +221,7 @@ export const useAvatarImage = ({
         abortRef.current = null;
       }
     };
-  }, [baseUrl, cacheKey, fetchSelf, jwt, skip, status, userId]);
+  }, [baseUrl, cacheKey, fetchSelf, jwt, skip, status, userId, username]);
 
   useEffect(() => {
     return () => {
@@ -197,26 +229,12 @@ export const useAvatarImage = ({
         abortRef.current.abort();
         abortRef.current = null;
       }
-      if (localUrlRef.current) {
-        revokeObjectUrl(localUrlRef.current);
-        localUrlRef.current = null;
-      }
     };
   }, []);
 
   const refetch = useMemo(
     () => () => {
-      if (localUrlRef.current) {
-        revokeObjectUrl(localUrlRef.current);
-        localUrlRef.current = null;
-      }
-      if (cacheKey) {
-        const cached = objectUrlCache.get(cacheKey);
-        if (cached) {
-          revokeObjectUrl(cached);
-          objectUrlCache.delete(cacheKey);
-        }
-      }
+      clearCachedUrl(cacheKey);
       setObjectUrl(null);
       setStatus('reload');
       setError(null);

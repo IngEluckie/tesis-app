@@ -25,23 +25,44 @@ export const validateAvatarFile = (file) => {
   return { ok: true };
 };
 
-const buildAvatarEndpoint = ({ baseUrl, self = false, userId = null }) => {
+const buildAvatarEndpoint = ({
+  baseUrl,
+  self = false,
+  userId = null,
+  username = null,
+}) => {
   const normalizedBase = normalizeBackendBase(baseUrl);
   if (self) {
     return `${normalizedBase}/users/me/avatar`;
   }
-  if (userId === null || userId === undefined) {
-    throw new Error('Se requiere userId para consultar avatar de otro usuario');
+  if (userId !== null && userId !== undefined) {
+    return `${normalizedBase}/users/${encodeURIComponent(userId)}/avatar`;
   }
-  return `${normalizedBase}/users/${encodeURIComponent(userId)}/avatar`;
+  const normalizedUsername =
+    typeof username === 'string' ? username.trim() : '';
+  if (normalizedUsername) {
+    return `${normalizedBase}/users/by-username/${encodeURIComponent(
+      normalizedUsername
+    )}/avatar`;
+  }
+  throw new Error(
+    'Se requiere userId o username para consultar avatar de otro usuario'
+  );
 };
 
-export const fetchAvatarBlob = async ({ baseUrl, jwt, signal, self = false, userId = null }) => {
+export const fetchAvatarBlob = async ({
+  baseUrl,
+  jwt,
+  signal,
+  self = false,
+  userId = null,
+  username = null,
+}) => {
   if (!jwt) {
     throw new Error('Falta token de autenticación');
   }
 
-  const endpoint = buildAvatarEndpoint({ baseUrl, self, userId });
+  const endpoint = buildAvatarEndpoint({ baseUrl, self, userId, username });
   const response = await fetch(endpoint, {
     method: 'GET',
     headers: {
@@ -192,4 +213,3 @@ export const AVATAR_CONSTANTS = {
   MAX_FILE_SIZE_BYTES,
   ALLOWED_MIME_TYPES,
 };
-

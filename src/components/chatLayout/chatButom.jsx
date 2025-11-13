@@ -6,11 +6,12 @@ const ChatButton = ({
   username,
   avatarUrl,
   fallbackAvatarUrl = 'https://placehold.co/80x80?text=Chat',
+  isLoadingAvatar = false,
   className = '',
   ...buttonProps
 }) => {
-  const imageSrc = avatarUrl || fallbackAvatarUrl;
   const label = username || 'Chat';
+  const imageSrc = avatarUrl || fallbackAvatarUrl;
 
   return (
     <button
@@ -18,6 +19,7 @@ const ChatButton = ({
       className={`chat-button ${className}`}
       title={label}
       aria-label={label}
+      aria-busy={isLoadingAvatar ? 'true' : undefined}
       {...buttonProps}
     >
       <img

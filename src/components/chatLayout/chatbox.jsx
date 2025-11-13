@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from '../../context/sessionContext';
+import { useAvatarImage } from '../../hooks/useAvatarImage';
 
 import defaultUser from '../icons/default_user.png';
 
@@ -132,6 +133,31 @@ export const Chatbox = ({
       null
     );
   }, [userData]);
+
+  const contactUsername = useMemo(() => {
+    if (!chat || chat.isGroup) {
+      return null;
+    }
+    if (typeof chat.contactUsername === 'string' && chat.contactUsername.trim()) {
+      return chat.contactUsername.trim();
+    }
+    if (typeof chat.name === 'string' && chat.name.trim()) {
+      return chat.name.trim();
+    }
+    return null;
+  }, [chat]);
+
+  const { avatarSrc: counterpartAvatarSrc, status: counterpartAvatarStatus } = useAvatarImage({
+    username: contactUsername,
+    skip: !contactUsername,
+  });
+
+  const counterpartAvatar = useMemo(() => {
+    if (chat && chat.avatarUrl) {
+      return chat.avatarUrl;
+    }
+    return counterpartAvatarSrc || defaultUser;
+  }, [chat, counterpartAvatarSrc]);
 
   const sortedMessages = useMemo(() => {
     if (!Array.isArray(messages)) {
@@ -440,8 +466,13 @@ export const Chatbox = ({
         <div className="chatbox__counterpart">
           <img
             className="chatbox__avatar"
-            src={chat?.avatarUrl || defaultUser}
+            src={counterpartAvatar}
             alt={`Avatar de ${chat?.name || 'contacto'}`}
+            aria-busy={
+              contactUsername && !chat?.avatarUrl && counterpartAvatarStatus === 'loading'
+                ? 'true'
+                : undefined
+            }
           />
           <div className="chatbox__meta">
             <span className="chatbox__name">{chat?.name || 'Chat'}</span>

@@ -3,9 +3,17 @@ import { useSession } from '../../context/sessionContext';
 import ChatButton from './chatButom';
 
 import default_user from '../icons/default_user.png';
+import { fetchAvatarBlob } from '../../services/avatarService';
 
 const DEFAULT_BACKEND_BASE = 'http://127.0.0.1:8000';
 const DEFAULT_PAGE_SIZE = 10;
+
+const revokeObjectUrl = (url) => {
+  if (!url) {
+    return;
+  }
+  URL.revokeObjectURL(url);
+};
 
 const normalizeChatsPayload = (payload) => {
   if (!payload || typeof payload !== 'object') {
@@ -22,11 +30,20 @@ const normalizeChatsPayload = (payload) => {
       if (chatId === undefined || chatId === null) {
         return null;
       }
+      const isGroup = Boolean(entry.is_group);
+      const contactUsername = (() => {
+        if (isGroup) {
+          return null;
+        }
+        const raw = typeof entry.chat_name === 'string' ? entry.chat_name.trim() : '';
+        return raw || null;
+      })();
       return {
         id: chatId,
         name: entry.chat_name || 'Chat sin nombre',
-        isGroup: Boolean(entry.is_group),
+        isGroup,
         lastActivity: entry.last_activity || null,
+        contactUsername,
       };
     })
     .filter(Boolean);
@@ -45,6 +62,68 @@ export const Chatsbar = ({
   const [hasMore, setHasMore] = useState(true);
 
   const requestAbortRef = useRef(null);
+  const avatarsRef = useRef({});
+  const [avatars, setAvatars] = useState(() => {
+    const initial = {};
+    avatarsRef.current = initial;
+    return initial;
+  });
+  const avatarAbortControllersRef = useRef(new Map());
+
+  const updateAvatars = useCallback((updater) => {
+    setAvatars((previous) => {
+      const next = updater(previous);
+      avatarsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (jwt) {
+      return;
+    }
+    avatarAbortControllersRef.current.forEach((controller) => {
+      try {
+        controller.abort();
+      } catch (_) {
+        // Ignore abort errors.
+      }
+    });
+    avatarAbortControllersRef.current.clear();
+    updateAvatars((previous) => {
+      if (!previous || Object.keys(previous).length === 0) {
+        return previous;
+      }
+      Object.values(previous).forEach((entry) => {
+        if (entry?.objectUrl) {
+          revokeObjectUrl(entry.objectUrl);
+        }
+      });
+      return {};
+    });
+  }, [jwt, updateAvatars]);
+
+  useEffect(() => {
+    const controllersSnapshot = avatarAbortControllersRef.current;
+    const avatarsSnapshot = avatarsRef.current;
+    return () => {
+      controllersSnapshot.forEach((controller) => {
+        try {
+          controller.abort();
+        } catch (_) {
+          // Ignore abort errors.
+        }
+      });
+      controllersSnapshot.clear();
+      Object.values(avatarsSnapshot).forEach((entry) => {
+        if (entry?.objectUrl) {
+          revokeObjectUrl(entry.objectUrl);
+        }
+      });
+      avatarsRef.current = {};
+      avatarAbortControllersRef.current = new Map();
+    };
+  }, []);
 
   const backendBaseUrl = useMemo(() => {
     const raw = (browserUrl || '').trim();
@@ -144,6 +223,141 @@ export const Chatsbar = ({
     };
   }, [fetchChats, jwt]);
 
+  useEffect(() => {
+    if (!jwt) {
+      return;
+    }
+
+    const usernames = new Set();
+    chats.forEach((chat) => {
+      if (!chat || chat.isGroup) {
+        return;
+      }
+      const raw = typeof chat.contactUsername === 'string' ? chat.contactUsername.trim() : '';
+      if (raw) {
+        usernames.add(raw);
+      }
+    });
+
+    const storedKeys = Object.keys(avatarsRef.current || {});
+    const keysToRemove = storedKeys.filter((key) => !usernames.has(key));
+    if (keysToRemove.length > 0) {
+      updateAvatars((previous) => {
+        if (!previous) {
+          return previous;
+        }
+        const next = { ...previous };
+        keysToRemove.forEach((key) => {
+          const pending = avatarAbortControllersRef.current.get(key);
+          if (pending) {
+            try {
+              pending.abort();
+            } catch (_) {
+              // Ignore abort errors.
+            }
+            avatarAbortControllersRef.current.delete(key);
+          }
+          const entry = next[key];
+          if (entry?.objectUrl) {
+            revokeObjectUrl(entry.objectUrl);
+          }
+          delete next[key];
+        });
+        return next;
+      });
+    }
+
+    usernames.forEach((username) => {
+      const existingEntry = avatarsRef.current[username];
+      if (existingEntry && (existingEntry.status === 'loaded' || existingEntry.status === 'not-found')) {
+        return;
+      }
+      if (existingEntry && existingEntry.status === 'loading') {
+        return;
+      }
+
+      const controller = new AbortController();
+      avatarAbortControllersRef.current.set(username, controller);
+
+      updateAvatars((previous) => ({
+        ...previous,
+        [username]: {
+          url: previous?.[username]?.url ?? null,
+          objectUrl: previous?.[username]?.objectUrl ?? null,
+          status: 'loading',
+        },
+      }));
+
+      fetchAvatarBlob({
+        baseUrl: backendBaseUrl,
+        jwt,
+        username,
+        signal: controller.signal,
+      })
+        .then((result) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          if (!result.ok) {
+            updateAvatars((previous) => {
+              const next = { ...previous };
+              const entry = next[username];
+              if (entry?.status === 'not-found') {
+                return previous;
+              }
+              if (entry?.objectUrl) {
+                revokeObjectUrl(entry.objectUrl);
+              }
+              next[username] = {
+                url: null,
+                objectUrl: null,
+                status: 'not-found',
+              };
+              return next;
+            });
+            return;
+          }
+
+          const objectUrl = URL.createObjectURL(result.blob);
+          updateAvatars((previous) => {
+            const next = { ...previous };
+            const entry = next[username];
+            if (entry?.objectUrl && entry.objectUrl !== objectUrl) {
+              revokeObjectUrl(entry.objectUrl);
+            }
+            next[username] = {
+              url: objectUrl,
+              objectUrl,
+              status: 'loaded',
+            };
+            return next;
+          });
+        })
+        .catch((error) => {
+          if (error?.name === 'AbortError') {
+            return;
+          }
+          updateAvatars((previous) => {
+            const next = { ...previous };
+            const entry = next[username];
+            if (entry?.status === 'loaded') {
+              return next;
+            }
+            next[username] = {
+              url: entry?.url ?? null,
+              objectUrl: entry?.objectUrl ?? null,
+              status: 'error',
+            };
+            return next;
+          });
+        })
+        .finally(() => {
+          avatarAbortControllersRef.current.delete(username);
+        });
+    });
+  }, [backendBaseUrl, chats, jwt, updateAvatars]);
+
   const handleLoadMore = useCallback(() => {
     if (isLoading || !hasMore) {
       return;
@@ -168,7 +382,13 @@ export const Chatsbar = ({
       <ChatButton
         key={chat.id}
         username={chat.name}
-        avatarUrl={default_user}
+        avatarUrl={
+          chat.contactUsername ? avatars[chat.contactUsername]?.url ?? null : null
+        }
+        fallbackAvatarUrl={default_user}
+        isLoadingAvatar={
+          chat.contactUsername ? avatars[chat.contactUsername]?.status === 'loading' : false
+        }
         onClick={() => onSelectChat(chat)}
       />
     ));
