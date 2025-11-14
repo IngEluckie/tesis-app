@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from '../../context/sessionContext';
+import { useRealtimeStore } from '../../context/realtimeStore';
 import ChatButton from './chatButom';
 
 import default_user from '../icons/default_user.png';
@@ -55,6 +56,7 @@ export const Chatsbar = ({
   onSelectChat = () => {},
 }) => {
   const { jwt, browserUrl } = useSession();
+  const { trackUsernames, getStatusForUsername, unreadByChatId } = useRealtimeStore();
   const [chats, setChats] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -134,6 +136,29 @@ export const Chatsbar = ({
       : DEFAULT_BACKEND_BASE;
     return withProtocol.replace(/\/+$/, '');
   }, [browserUrl]);
+
+  const formatPresenceLabel = useCallback((presence) => {
+    if (!presence) {
+      return 'Desconectado';
+    }
+    if (presence.status === 'connected') {
+      if (Number(presence.connection_count) > 1) {
+        return `En línea en ${presence.connection_count} dispositivos`;
+      }
+      return 'En línea';
+    }
+    if (presence.last_seen) {
+      try {
+        const lastSeenDate = new Date(presence.last_seen);
+        if (!Number.isNaN(lastSeenDate.getTime())) {
+          return `Últ. vez ${lastSeenDate.toLocaleString()}`;
+        }
+      } catch (error) {
+        console.warn('No se pudo formatear last_seen:', error);
+      }
+    }
+    return 'Desconectado';
+  }, []);
 
   const fetchChats = useCallback(
     async ({ append = false, startOffset = 0 } = {}) => {
@@ -222,6 +247,16 @@ export const Chatsbar = ({
       }
     };
   }, [fetchChats, jwt]);
+
+  useEffect(() => {
+    const usernames = chats
+      .map((chat) => chat.contactUsername)
+      .filter(Boolean);
+    if (usernames.length === 0) {
+      return;
+    }
+    trackUsernames(usernames);
+  }, [chats, trackUsernames]);
 
   useEffect(() => {
     if (!jwt) {
@@ -378,20 +413,28 @@ export const Chatsbar = ({
     if (chats.length === 0) {
       return <div className="chats-bar__placeholder">Aún no hay conversaciones recientes.</div>;
     }
-    return chats.map((chat) => (
-      <ChatButton
-        key={chat.id}
-        username={chat.name}
-        avatarUrl={
-          chat.contactUsername ? avatars[chat.contactUsername]?.url ?? null : null
-        }
-        fallbackAvatarUrl={default_user}
-        isLoadingAvatar={
-          chat.contactUsername ? avatars[chat.contactUsername]?.status === 'loading' : false
-        }
-        onClick={() => onSelectChat(chat)}
-      />
-    ));
+    return chats.map((chat) => {
+      const contactUsername = chat.contactUsername || null;
+      const presence = contactUsername ? getStatusForUsername(contactUsername) : null;
+      const presenceLabel = contactUsername ? formatPresenceLabel(presence) : 'Chat grupal';
+      const unreadCount = unreadByChatId[String(chat.id)] || 0;
+
+      return (
+        <ChatButton
+          key={chat.id}
+          username={chat.name}
+          avatarUrl={contactUsername ? avatars[contactUsername]?.url ?? null : null}
+          fallbackAvatarUrl={default_user}
+          isLoadingAvatar={
+            contactUsername ? avatars[contactUsername]?.status === 'loading' : false
+          }
+          presenceStatus={presence}
+          presenceLabel={presenceLabel}
+          unreadCount={unreadCount}
+          onClick={() => onSelectChat(chat)}
+        />
+      );
+    });
   };
 
   return (

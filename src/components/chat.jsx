@@ -11,12 +11,18 @@ import { Navbar } from './chatLayout/navbar';
 import { Chatsbar } from './chatLayout/chatsbar';
 import { Chatbox } from './chatLayout/chatbox';
 import { UserInfo } from './chatLayout/userInfo';
-import { useSession } from '../context/sessionContext';
+import { useRealtime, useSession } from '../context/sessionContext';
 import { Settings } from './chatLayout/settings';
 import { Dashito } from './chatLayout/dashito';
+import { useRealtimeStore } from '../context/realtimeStore';
 
 // Styles
 import './chatLayout/chat-styles.css';
+import {
+  mergeAttachmentLists,
+  normalizeMessageRecord,
+  toAttachmentId,
+} from '../utils/messages';
 
 const DEFAULT_BACKEND_BASE = 'http://127.0.0.1:8000';
 const DEFAULT_MESSAGES_LIMIT = 25;
@@ -28,108 +34,6 @@ const normalizeBackendBase = (value) => {
   }
   const withProtocol = /^https?:\/\//i.test(base) ? base : `http://${base}`;
   return withProtocol.replace(/\/+$/, '');
-};
-
-const ATTACHMENT_ID_KEYS = [
-  'attachment_id',
-  'id',
-  'uuid',
-  'file_id',
-  'attachmentId',
-  'attachmentID',
-];
-
-const toAttachmentId = (attachment) => {
-  if (!attachment || typeof attachment !== 'object') {
-    return null;
-  }
-  for (const key of ATTACHMENT_ID_KEYS) {
-    if (attachment[key] !== undefined && attachment[key] !== null) {
-      return attachment[key];
-    }
-  }
-  return null;
-};
-
-const toAttachmentKey = (attachment) => {
-  const id = toAttachmentId(attachment);
-  if (id === null || id === undefined) {
-    return `tmp:${JSON.stringify(attachment)}`;
-  }
-  return `id:${String(id)}`;
-};
-
-const mergeAttachmentLists = (current = [], incoming = []) => {
-  const map = new Map();
-  const append = (attachment) => {
-    if (!attachment || typeof attachment !== 'object') {
-      return;
-    }
-    const key = toAttachmentKey(attachment);
-    const existing = map.get(key);
-    map.set(
-      key,
-      existing ? { ...existing, ...attachment } : { ...attachment }
-    );
-  };
-  (Array.isArray(current) ? current : []).forEach(append);
-  (Array.isArray(incoming) ? incoming : []).forEach(append);
-  return Array.from(map.values());
-};
-
-const normalizeAttachments = (raw) => {
-  if (!raw || typeof raw !== 'object') {
-    return [];
-  }
-  const fromArray = Array.isArray(raw.attachments) ? raw.attachments : [];
-  const single = raw.attachment
-    ? Array.isArray(raw.attachment)
-      ? raw.attachment
-      : [raw.attachment]
-    : [];
-  return mergeAttachmentLists(fromArray, single);
-};
-
-const normalizeMessageRecord = (raw) => {
-  if (!raw || typeof raw !== 'object') {
-    return null;
-  }
-  const messageId =
-    raw.message_id ??
-    raw.id ??
-    raw.uuid ??
-    raw.messageId ??
-    raw.local_id ??
-    null;
-
-  return {
-    ...raw,
-    message_id: messageId,
-    attachments: normalizeAttachments(raw),
-  };
-};
-
-const mergeMessageRecords = (current, incoming) => {
-  if (!current && !incoming) {
-    return null;
-  }
-  if (!current) {
-    return {
-      ...incoming,
-      attachments: mergeAttachmentLists([], incoming?.attachments),
-    };
-  }
-  if (!incoming) {
-    return {
-      ...current,
-      attachments: mergeAttachmentLists(current.attachments, []),
-    };
-  }
-  return {
-    ...current,
-    ...incoming,
-    attachments: mergeAttachmentLists(current.attachments, incoming.attachments),
-  };
 };
 
 const extractNextCursor = (payload) => {
@@ -181,20 +85,23 @@ export const Chat = () => {
     browserUrl,
     jwt,
     connectWebsocket,
-    websocket,
     websocketStatus,
-    websocketLastMessage,
     sendWebsocketMessage,
   } = useSession();
+  const realtime = useRealtime();
+  const {
+    registerChatHistory,
+    setActiveChat: setActiveChatInStore,
+    markChatAsRead,
+    getChatMeta,
+    messagesByChatId,
+  } = useRealtimeStore();
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [activeChat, setActiveChat] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [historyCursor, setHistoryCursor] = useState(null);
+  const [activeChat, setActiveChatState] = useState(null);
   const [historyError, setHistoryError] = useState(null);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isHistoryLoadingMore, setIsHistoryLoadingMore] = useState(false);
-  const [hasMoreHistory, setHasMoreHistory] = useState(false);
 
   const activeChatIdRef = useRef(null);
   const abortControllerRef = useRef(null);
@@ -205,42 +112,31 @@ export const Chat = () => {
     [browserUrl]
   );
 
-  const upsertMessage = useCallback((incoming) => {
-    if (!incoming || typeof incoming !== 'object') {
-      return;
+  const messages = useMemo(() => {
+    if (!activeChat || !activeChat.id) {
+      return [];
     }
-    setMessages((prev) => {
-      const messageId = incoming.message_id ?? null;
-      if (!messageId) {
-        return [...prev, incoming];
-      }
-      const index = prev.findIndex(
-        (msg) =>
-          msg &&
-          typeof msg === 'object' &&
-          msg.message_id &&
-          msg.message_id === messageId
-      );
-      if (index === -1) {
-        return [...prev, incoming];
-      }
-      const next = [...prev];
-      next[index] = mergeMessageRecords(prev[index], incoming);
-      return next;
-    });
-  }, []);
+    const chatKey = String(activeChat.id);
+    return messagesByChatId[chatKey] || [];
+  }, [activeChat, messagesByChatId]);
+
+  const chatMeta = useMemo(() => {
+    if (!activeChat || !activeChat.id) {
+      return null;
+    }
+    return getChatMeta(activeChat.id);
+  }, [activeChat, getChatMeta]);
+
+  const realtimeStatus = realtime?.status || '';
 
   const resetHistoryState = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
-    setMessages([]);
-    setHistoryCursor(null);
     setHistoryError(null);
     setIsHistoryLoading(false);
     setIsHistoryLoadingMore(false);
-    setHasMoreHistory(false);
   }, []);
 
   const fetchChatMessages = useCallback(
@@ -304,62 +200,20 @@ export const Chat = () => {
 
         const normalizedMessages = rawMessages
           .map((item) => normalizeMessageRecord(item))
-          .filter(Boolean)
-          .sort((a, b) => {
-            const aTs = new Date(a.created_at || a.createdAt || 0).getTime();
-            const bTs = new Date(b.created_at || b.createdAt || 0).getTime();
-            return aTs - bTs;
-          });
+          .filter(Boolean);
 
-        const nextCursor = extractNextCursor(payload);
-        const hasMore = extractHasMore(payload);
+        const nextCursor = extractNextCursor(payload) ?? null;
+        const hasMore = Boolean(extractHasMore(payload));
 
-        if (activeChatIdRef.current !== chatId) {
-          return;
-        }
-
-        setMessages((prev) => {
-          if (isReplace) {
-            return normalizedMessages;
-          }
-
-          const next = [...prev];
-          const indexById = new Map();
-          next.forEach((msg, index) => {
-            if (msg && typeof msg === 'object' && msg.message_id) {
-              indexById.set(msg.message_id, index);
-            }
-          });
-
-          const freshMessages = [];
-
-          normalizedMessages.forEach((msg) => {
-            if (!msg || typeof msg !== 'object') {
-              return;
-            }
-            const { message_id: msgId } = msg;
-            if (msgId && indexById.has(msgId)) {
-              const targetIndex = indexById.get(msgId);
-              next[targetIndex] = mergeMessageRecords(next[targetIndex], msg);
-            } else if (isPrepend) {
-              freshMessages.push(msg);
-            } else {
-              next.push(msg);
-              if (msgId) {
-                indexById.set(msgId, next.length - 1);
-              }
-            }
-          });
-
-          if (!isPrepend || freshMessages.length === 0) {
-            return next;
-          }
-
-          return [...freshMessages, ...next];
+        registerChatHistory(chatId, normalizedMessages, {
+          mode,
+          hasMore,
+          nextCursor,
         });
 
-        setHistoryCursor(nextCursor);
-        setHasMoreHistory(Boolean(hasMore));
+        if (isReplace && activeChatIdRef.current === chatId) {
+          markChatAsRead(chatId);
+        }
       } catch (error) {
         if (controller.signal.aborted) {
           return;
@@ -376,12 +230,12 @@ export const Chat = () => {
         if (isReplace && activeChatIdRef.current === chatId) {
           setIsHistoryLoading(false);
         }
-        if (mode === 'prepend' && activeChatIdRef.current === chatId) {
+        if (isPrepend && activeChatIdRef.current === chatId) {
           setIsHistoryLoadingMore(false);
         }
       }
     },
-    [backendBaseUrl, jwt]
+    [backendBaseUrl, jwt, markChatAsRead, registerChatHistory]
   );
 
   const handleSelectChat = useCallback(
@@ -390,11 +244,13 @@ export const Chat = () => {
         return;
       }
       activeChatIdRef.current = chat.id;
-      setActiveChat(chat);
+      setActiveChatState(chat);
+      setActiveChatInStore(chat.id);
+      markChatAsRead(chat.id);
       resetHistoryState();
       fetchChatMessages({ chatId: chat.id, mode: 'replace' });
     },
-    [fetchChatMessages, resetHistoryState]
+    [fetchChatMessages, markChatAsRead, resetHistoryState, setActiveChatInStore]
   );
 
   const handleOpenChatByUsername = useCallback(
@@ -458,15 +314,23 @@ export const Chat = () => {
   );
 
   const handleLoadOlderMessages = useCallback(() => {
-    if (!activeChat || !historyCursor || isHistoryLoadingMore) {
+    if (!activeChat || isHistoryLoadingMore) {
+      return;
+    }
+    const nextCursor = chatMeta?.nextCursor;
+    const hasMore = chatMeta?.hasMore;
+    if (!hasMore) {
+      return;
+    }
+    if (!nextCursor) {
       return;
     }
     fetchChatMessages({
       chatId: activeChat.id,
-      cursor: historyCursor,
+      cursor: nextCursor,
       mode: 'prepend',
     });
-  }, [activeChat, fetchChatMessages, historyCursor, isHistoryLoadingMore]);
+  }, [activeChat, chatMeta, fetchChatMessages, isHistoryLoadingMore]);
 
   const handleSendMessage = useCallback(
     async (content) => {
@@ -502,8 +366,11 @@ export const Chat = () => {
         }
 
         const normalized = normalizeMessageRecord(payload);
-        if (normalized && activeChatIdRef.current === activeChat.id) {
-          upsertMessage(normalized);
+        if (normalized) {
+          registerChatHistory(activeChat.id, [normalized], {
+            mode: 'append',
+          });
+          markChatAsRead(activeChat.id);
         }
 
         return { ok: true };
@@ -511,7 +378,7 @@ export const Chat = () => {
         return { ok: false, error: error?.message || 'Error al enviar mensaje' };
       }
     },
-    [activeChat, backendBaseUrl, jwt, upsertMessage]
+    [activeChat, backendBaseUrl, jwt, markChatAsRead, registerChatHistory]
   );
 
   const handleUploadAttachment = useCallback(
@@ -579,8 +446,11 @@ export const Chat = () => {
           };
         }
 
-        if (normalized && activeChatIdRef.current === activeChat.id) {
-          upsertMessage(normalized);
+        if (normalized) {
+          registerChatHistory(activeChat.id, [normalized], {
+            mode: 'append',
+          });
+          markChatAsRead(activeChat.id);
         }
 
         return { ok: true, message: normalized };
@@ -591,7 +461,7 @@ export const Chat = () => {
         };
       }
     },
-    [activeChat, backendBaseUrl, jwt, upsertMessage]
+    [activeChat, backendBaseUrl, jwt, markChatAsRead, registerChatHistory]
   );
 
   const handleDownloadAttachment = useCallback(
@@ -667,9 +537,10 @@ export const Chat = () => {
       return;
     }
     activeChatIdRef.current = null;
-    setActiveChat(null);
+    setActiveChatState(null);
+    setActiveChatInStore(null);
     resetHistoryState();
-  }, [jwt, resetHistoryState]);
+  }, [jwt, resetHistoryState, setActiveChatInStore]);
 
   useEffect(() => {
     if (!jwt) {
@@ -681,25 +552,26 @@ export const Chat = () => {
   }, [connectWebsocket, jwt]);
 
   useEffect(() => {
-    if (websocketStatus === 'open' || websocketStatus === 'connecting') {
-      return;
-    }
-    joinedChatIdRef.current = null;
-  }, [websocketStatus]);
-
-  useEffect(() => {
-    const socket = websocket;
     const chatIdRaw = activeChat?.id;
 
-    if (!socket) {
-      return undefined;
-    }
+    const leaveChat = (targetId, options = {}) => {
+      if (targetId === null || targetId === undefined) {
+        return;
+      }
+      const payload = { type: 'leave', chat_id: targetId };
+      if (realtime?.send) {
+        realtime.send(payload, { enqueue: options.enqueue ?? false });
+      } else {
+        sendWebsocketMessage(payload);
+      }
+      if (joinedChatIdRef.current === targetId) {
+        joinedChatIdRef.current = null;
+      }
+    };
 
     if (chatIdRaw === undefined || chatIdRaw === null) {
-      const previousChatId = joinedChatIdRef.current;
-      if (previousChatId !== null && socket.readyState === WebSocket.OPEN) {
-        sendWebsocketMessage({ type: 'leave', chat_id: previousChatId });
-        joinedChatIdRef.current = null;
+      if (joinedChatIdRef.current !== null) {
+        leaveChat(joinedChatIdRef.current, { enqueue: false });
       }
       return undefined;
     }
@@ -709,97 +581,48 @@ export const Chat = () => {
       return undefined;
     }
 
-    const leaveChat = (targetId) => {
-      if (targetId === null || targetId === undefined) {
-        return;
-      }
-      sendWebsocketMessage({ type: 'leave', chat_id: targetId });
-      if (joinedChatIdRef.current === targetId) {
-        joinedChatIdRef.current = null;
-      }
-    };
-
     const joinChat = () => {
-      const success = sendWebsocketMessage({ type: 'join', chat_id: chatId });
-      if (success) {
-        joinedChatIdRef.current = chatId;
-      }
-      return success;
-    };
-
-    const openState =
-      typeof window !== 'undefined' && window.WebSocket
-        ? window.WebSocket.OPEN
-        : 1;
-
-    const ensureJoined = () => {
-      const previousChatId = joinedChatIdRef.current;
-      if (previousChatId !== null && previousChatId !== chatId) {
-        leaveChat(previousChatId);
-      }
-      if (joinedChatIdRef.current !== chatId) {
-        joinChat();
+      const payload = { type: 'join', chat_id: chatId };
+      if (realtime?.send) {
+        const result = realtime.send(payload);
+        if (result?.ok || result?.queued) {
+          joinedChatIdRef.current = chatId;
+        }
+      } else {
+        const success = sendWebsocketMessage(payload);
+        if (success) {
+          joinedChatIdRef.current = chatId;
+        }
       }
     };
 
-    if (socket.readyState === openState) {
-      ensureJoined();
-    } else {
-      const handleOpen = () => {
-        ensureJoined();
-      };
-      socket.addEventListener('open', handleOpen, { once: true });
-      return () => {
-        socket.removeEventListener('open', handleOpen);
-        leaveChat(chatId);
-      };
+    const previousChatId = joinedChatIdRef.current;
+    if (previousChatId !== null && previousChatId !== chatId) {
+      leaveChat(previousChatId, { enqueue: false });
+    }
+
+    if (
+      realtimeStatus === 'open' ||
+      websocketStatus === 'open'
+    ) {
+      joinChat();
+    } else if (
+      realtimeStatus !== 'registering' &&
+      realtimeStatus !== 'connecting' &&
+      realtimeStatus !== 'reconnecting' &&
+      websocketStatus !== 'connecting'
+    ) {
+      connectWebsocket().catch((error) => {
+        console.warn('No fue posible reconectar el WebSocket:', error);
+      });
     }
 
     return () => {
-      leaveChat(chatId);
+      if (joinedChatIdRef.current === chatId) {
+        leaveChat(chatId, { enqueue: false });
+      }
     };
-  }, [activeChat, sendWebsocketMessage, websocket]);
-
-  useEffect(() => {
-    if (!websocketLastMessage) {
-      return;
-    }
-
-    let parsed;
-    try {
-      parsed =
-        typeof websocketLastMessage === 'string'
-          ? JSON.parse(websocketLastMessage)
-          : websocketLastMessage;
-    } catch (error) {
-      console.warn('Mensaje WebSocket inválido:', websocketLastMessage);
-      return;
-    }
-
-    const eventType =
-      parsed?.type || parsed?.event || parsed?.action || parsed?.kind;
-
-    if (eventType !== 'chat.message') {
-      return;
-    }
-
-    const payload = parsed?.payload || parsed?.data || parsed?.message || {};
-    const messageRecord = payload?.message || payload;
-    const chatId = Number(
-      messageRecord?.chat_id ?? payload?.chat_id ?? payload?.chatId
-    );
-
-    if (!activeChat || Number(activeChat.id) !== chatId) {
-      return;
-    }
-
-    const normalized = normalizeMessageRecord(messageRecord);
-    if (!normalized) {
-      return;
-    }
-
-    upsertMessage(normalized);
-  }, [activeChat, upsertMessage, websocketLastMessage]);
+  }, [activeChat, connectWebsocket, realtime, realtimeStatus, sendWebsocketMessage, websocketStatus]);
 
   useEffect(() => {
     return () => {
@@ -832,7 +655,7 @@ export const Chat = () => {
             messages={messages}
             isLoading={isHistoryLoading && messages.length === 0}
             isLoadingMore={isHistoryLoadingMore}
-            hasMore={hasMoreHistory}
+            hasMore={chatMeta?.hasMore ?? false}
             error={historyError}
             onLoadMore={handleLoadOlderMessages}
             onSendMessage={handleSendMessage}

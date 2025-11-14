@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSession } from '../../context/sessionContext';
+import { useRealtime, useSession } from '../../context/sessionContext';
+import { useRealtimeStore } from '../../context/realtimeStore';
 
 import default_user from '../icons/default_user.png'
 
@@ -13,6 +14,8 @@ export const Navbar = ({
   onOpenSettings = () => {},
 }) => {
   const { userData, websocketStatus, browserUrl, jwt } = useSession();
+  const realtime = useRealtime();
+  const { trackUsernames: trackPresenceUsernames, getStatusForUsername } = useRealtimeStore();
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -69,15 +72,70 @@ export const Navbar = ({
     return withProtocol.replace(/\/+$/, '');
   }, [browserUrl]);
 
+  const realtimeStatus = realtime?.status || '';
+  const isRealtimeOnline = Boolean(realtime?.isOnline);
+
   const avatarConnectionClass = useMemo(() => {
-    if (websocketStatus === 'open') {
+    if (isRealtimeOnline || websocketStatus === 'open') {
       return 'navbar__avatar--ws-open';
     }
-    if (websocketStatus === 'error') {
+    if (realtimeStatus === 'reconnecting') {
+      return 'navbar__avatar--ws-reconnecting';
+    }
+    if (websocketStatus === 'error' || realtimeStatus === 'error') {
       return 'navbar__avatar--ws-error';
     }
     return '';
-  }, [websocketStatus]);
+  }, [isRealtimeOnline, realtimeStatus, websocketStatus]);
+
+  const connectionLabel = useMemo(() => {
+    if (isRealtimeOnline) {
+      return 'Conectado';
+    }
+    if (realtimeStatus === 'reconnecting') {
+      return 'Reconectando…';
+    }
+    if (realtimeStatus === 'connecting' || realtimeStatus === 'registering' || websocketStatus === 'connecting') {
+      return 'Conectando…';
+    }
+    if (websocketStatus === 'error' || realtimeStatus === 'error') {
+      return 'Sin conexión';
+    }
+    return 'Desconectado';
+  }, [isRealtimeOnline, realtimeStatus, websocketStatus]);
+
+  const describePresence = useCallback((presence) => {
+    if (!presence) {
+      return 'Desconectado';
+    }
+    if (presence.status === 'connected') {
+      return 'En línea';
+    }
+    if (presence.last_seen) {
+      try {
+        const lastSeenDate = new Date(presence.last_seen);
+        if (!Number.isNaN(lastSeenDate.getTime())) {
+          return `Últ. vez ${lastSeenDate.toLocaleString()}`;
+        }
+      } catch (error) {
+        console.warn('No se pudo formatear la última conexión:', error);
+      }
+    }
+    return 'Desconectado';
+  }, []);
+
+  const classifyPresenceState = useCallback((presence) => {
+    if (!presence) {
+      return 'offline';
+    }
+    if (presence.status === 'connected') {
+      return 'online';
+    }
+    if (presence.status === 'idle' || presence.status === 'away') {
+      return 'idle';
+    }
+    return 'offline';
+  }, []);
 
   const resetSearchFeedback = useCallback(() => {
     setSearchResults([]);
@@ -151,6 +209,9 @@ export const Navbar = ({
 
         const normalizedResults = normalizeSearchPayload(payload);
         setSearchResults(normalizedResults);
+        if (normalizedResults.length > 0) {
+          trackPresenceUsernames(normalizedResults);
+        }
         setDropdownVisible(true);
 
         if (!Array.isArray(payload)) {
@@ -180,7 +241,7 @@ export const Navbar = ({
         requestAbortRef.current = null;
       }
     };
-  }, [backendBaseUrl, jwt, normalizeSearchPayload, resetSearchFeedback, searchTerm]);
+  }, [backendBaseUrl, jwt, normalizeSearchPayload, resetSearchFeedback, searchTerm, trackPresenceUsernames]);
 
   const handleSubmitSearch = useCallback(
     (event) => {
@@ -217,6 +278,12 @@ export const Navbar = ({
           />
           <div className="navbar__identity">
             <span className="navbar__username">{user.username}</span>
+            <span
+              className="navbar__presence"
+              title={realtime?.lastError || undefined}
+            >
+              {connectionLabel}
+            </span>
             <label className="navbar__mute" aria-label="Silencio">
               <span className="navbar__mute-label">Silencio</span>
               <button
@@ -281,17 +348,30 @@ export const Navbar = ({
 
               {!isSearching &&
                 !searchError &&
-                searchResults.map((username) => (
-                  <button
-                    type="button"
+                searchResults.map((username) => {
+                  const presence = getStatusForUsername(username);
+                  const presenceState = classifyPresenceState(presence);
+                  const presenceDescription = describePresence(presence);
+
+                  return (
+                    <button
+                      type="button"
                     key={username}
                     className="navbar__search-result"
                     role="option"
+                    aria-selected="false"
                     onClick={() => handleSelectUsername(username)}
+                    title={presenceDescription}
                   >
-                    {username}
-                  </button>
-                ))}
+                      <span
+                        className={`navbar__search-result-presence navbar__search-result-presence--${presenceState}`}
+                        aria-hidden="true"
+                      />
+                      <span className="navbar__search-result-username">{username}</span>
+                      <span className="navbar__search-result-status">{presenceDescription}</span>
+                    </button>
+                  );
+                })}
             </div>
           )}
         </div>

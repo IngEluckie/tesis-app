@@ -1,7 +1,7 @@
 // mainRouter.js
 
 import React from 'react'
-import { Route, Link, BrowserRouter, Routes } from 'react-router'
+import { Route, BrowserRouter, Routes } from 'react-router'
 import { Chat } from '../components/chat'
 import { AuthGate } from '../components/authGate'
 import { NotFound } from '../components/notFound'

@@ -1,4 +1,28 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
+const defaultRealtimeContext = {
+  status: 'idle',
+  isOnline: false,
+  lastError: null,
+  lastEvent: null,
+  queueLength: 0,
+  latency: null,
+  lastHeartbeatAt: null,
+  ensureConnection: async () => null,
+  disconnect: () => {},
+  send: () => ({ ok: false, queued: false, error: 'not-initialized' }),
+  subscribe: () => () => {},
+};
+
+export const RealtimeContext = createContext(defaultRealtimeContext);
 
 const defaultSession = {
   browserUrl: '',
@@ -16,6 +40,7 @@ const defaultSession = {
   connectWebsocket: async () => null,
   disconnectWebsocket: () => {},
   sendWebsocketMessage: () => false,
+  realtime: defaultRealtimeContext,
 };
 
 export const SessionContext = createContext(defaultSession);
@@ -50,6 +75,26 @@ const buildWebSocketUrl = (httpBase, token) =>
 const WEBSOCKET_READY_STATE = {
   CONNECTING: 0,
   OPEN: 1,
+  CLOSING: 2,
+  CLOSED: 3,
+};
+
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 10000;
+const RECONNECT_INITIAL_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30000;
+const MAX_OFFLINE_QUEUE = 100;
+
+const toSocketMessage = (payload) => {
+  if (typeof payload === 'string') {
+    return payload;
+  }
+  try {
+    return JSON.stringify(payload);
+  } catch (error) {
+    console.warn('No se pudo serializar el payload de WebSocket:', error);
+    return null;
+  }
 };
 
 const readUserData = () => {
@@ -79,13 +124,31 @@ export const SessionProvider = ({ children }) => {
   const [websocketError, setWebsocketError] = useState(null);
   const [websocketLastMessage, setWebsocketLastMessage] = useState(null);
   const [websocketRegistration, setWebsocketRegistration] = useState(null);
+  const [realtimeInfo, setRealtimeInfo] = useState({
+    status: 'idle',
+    isOnline: false,
+    lastError: null,
+    lastEvent: null,
+    queueLength: 0,
+    latency: null,
+    lastHeartbeatAt: null,
+  });
 
   const websocketRef = useRef(null);
   const websocketConnectingRef = useRef(false);
   const websocketAttemptRef = useRef(0);
+  const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true);
   const jwtRef = useRef(jwt);
   const avatarObjectUrlRef = useRef(null);
+  const eventListenersRef = useRef(new Map());
+  const offlineQueueRef = useRef([]);
+  const reconnectTimeoutRef = useRef(null);
+  const heartbeatIntervalRef = useRef(null);
+  const heartbeatTimeoutRef = useRef(null);
+  const lastPingTimestampRef = useRef(null);
+  const manualDisconnectRef = useRef(false);
+  const browserUrlRef = useRef(browserUrl);
 
   useEffect(() => {
     return () => {
@@ -252,9 +315,663 @@ export const SessionProvider = ({ children }) => {
     jwtRef.current = jwt;
   }, [jwt]);
 
+  useEffect(() => {
+    browserUrlRef.current = browserUrl;
+  }, [browserUrl]);
+
+  const updateRealtimeInfo = useCallback((updater) => {
+    if (!isMountedRef.current) {
+      return;
+    }
+    setRealtimeInfo((previous) => {
+      const patch =
+        typeof updater === 'function'
+          ? updater(previous)
+          : updater && typeof updater === 'object'
+          ? updater
+          : null;
+      if (!patch) {
+        return previous;
+      }
+      return { ...previous, ...patch };
+    });
+  }, []);
+
+  const clearReconnectTimeout = useCallback(() => {
+    if (typeof window === 'undefined') {
+      reconnectTimeoutRef.current = null;
+      return;
+    }
+    if (reconnectTimeoutRef.current !== null) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  }, []);
+
+  const clearHeartbeatTimers = useCallback(() => {
+    if (typeof window === 'undefined') {
+      heartbeatIntervalRef.current = null;
+      heartbeatTimeoutRef.current = null;
+      lastPingTimestampRef.current = null;
+      return;
+    }
+    if (heartbeatIntervalRef.current !== null) {
+      window.clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+    if (heartbeatTimeoutRef.current !== null) {
+      window.clearTimeout(heartbeatTimeoutRef.current);
+      heartbeatTimeoutRef.current = null;
+    }
+    lastPingTimestampRef.current = null;
+  }, []);
+
+  const flushOfflineQueue = useCallback(() => {
+    const socket = websocketRef.current;
+    if (!socket || socket.readyState !== WEBSOCKET_READY_STATE.OPEN) {
+      return;
+    }
+    const queue = offlineQueueRef.current;
+    if (!Array.isArray(queue) || queue.length === 0) {
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        queueLength: 0,
+      }));
+      return;
+    }
+
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item) {
+        continue;
+      }
+      const message = toSocketMessage(item.payload);
+      if (message === null) {
+        continue;
+      }
+      try {
+        socket.send(message);
+      } catch (error) {
+        console.warn('Fallo al enviar mensaje en cola:', error);
+        queue.unshift(item);
+        break;
+      }
+    }
+
+    updateRealtimeInfo((previous) => ({
+      ...previous,
+      queueLength: queue.length,
+    }));
+  }, [updateRealtimeInfo]);
+
+  const sendRealtimeMessage = useCallback(
+    (payload, options = {}) => {
+      const { enqueue = true } = options || {};
+      const socket = websocketRef.current;
+      const message = toSocketMessage(payload);
+      if (message === null) {
+        return { ok: false, queued: false, error: 'serialization-error' };
+      }
+
+      if (socket && socket.readyState === WEBSOCKET_READY_STATE.OPEN) {
+        try {
+          socket.send(message);
+          return { ok: true, queued: false };
+        } catch (error) {
+          console.warn('No se pudo enviar el mensaje por WebSocket:', error);
+        }
+      }
+
+      if (!enqueue) {
+        return { ok: false, queued: false, error: 'socket-not-open' };
+      }
+
+      const queue = offlineQueueRef.current;
+      if (queue.length >= MAX_OFFLINE_QUEUE) {
+        queue.shift();
+      }
+      queue.push({
+        payload,
+        enqueuedAt: Date.now(),
+      });
+
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        queueLength: queue.length,
+      }));
+
+      return { ok: false, queued: true };
+    },
+    [updateRealtimeInfo]
+  );
+
+  const handlePong = useCallback(() => {
+    if (typeof window !== 'undefined' && heartbeatTimeoutRef.current !== null) {
+      window.clearTimeout(heartbeatTimeoutRef.current);
+    }
+    heartbeatTimeoutRef.current = null;
+    const now = Date.now();
+    const lastPing = lastPingTimestampRef.current;
+    lastPingTimestampRef.current = null;
+    const latency = typeof lastPing === 'number' ? Math.max(0, now - lastPing) : null;
+    updateRealtimeInfo((previous) => ({
+      ...previous,
+      isOnline: true,
+      lastError: null,
+      lastHeartbeatAt: now,
+      latency: latency ?? previous.latency,
+    }));
+  }, [updateRealtimeInfo]);
+
+  const dispatchRealtimeEvent = useCallback(
+    (event) => {
+      const normalizedType =
+        event && typeof event.type === 'string' && event.type.trim()
+          ? event.type.trim()
+          : 'message';
+
+      const finalEvent = {
+        type: normalizedType,
+        payload: event?.payload ?? null,
+        raw: event?.raw ?? null,
+        receivedAt: event?.receivedAt ?? Date.now(),
+      };
+
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        lastEvent: finalEvent,
+      }));
+
+      const listenersByType = eventListenersRef.current.get(normalizedType);
+      if (listenersByType && listenersByType.size > 0) {
+        listenersByType.forEach((listener) => {
+          try {
+            listener(finalEvent);
+          } catch (error) {
+            console.error('Error en listener de eventos en tiempo real:', error);
+          }
+        });
+      }
+
+      const wildcardListeners = eventListenersRef.current.get('*');
+      if (wildcardListeners && wildcardListeners.size > 0) {
+        wildcardListeners.forEach((listener) => {
+          try {
+            listener(finalEvent);
+          } catch (error) {
+            console.error('Error en listener wildcard de tiempo real:', error);
+          }
+        });
+      }
+    },
+    [updateRealtimeInfo]
+  );
+
+  const subscribeToRealtime = useCallback((eventType, handler) => {
+    if (typeof handler !== 'function') {
+      return () => {};
+    }
+    const normalizedType =
+      typeof eventType === 'string' && eventType.trim() ? eventType.trim() : '*';
+    let listeners = eventListenersRef.current.get(normalizedType);
+    if (!listeners) {
+      listeners = new Set();
+      eventListenersRef.current.set(normalizedType, listeners);
+    }
+    listeners.add(handler);
+    return () => {
+      const currentListeners = eventListenersRef.current.get(normalizedType);
+      if (!currentListeners) {
+        return;
+      }
+      currentListeners.delete(handler);
+      if (currentListeners.size === 0) {
+        eventListenersRef.current.delete(normalizedType);
+      }
+    };
+  }, []);
+
+  const handleIncomingMessage = useCallback(
+    (raw) => {
+      if (!isMountedRef.current) {
+        return;
+      }
+
+      setWebsocketLastMessage(raw);
+
+      let parsedPayload = raw;
+      if (typeof raw === 'string') {
+        try {
+          parsedPayload = JSON.parse(raw);
+        } catch (error) {
+          parsedPayload = raw;
+        }
+      }
+
+      let eventType = 'message';
+      if (parsedPayload && typeof parsedPayload === 'object') {
+        const candidate =
+          parsedPayload.type ||
+          parsedPayload.event ||
+          parsedPayload.action ||
+          parsedPayload.kind;
+        if (typeof candidate === 'string' && candidate.trim()) {
+          eventType = candidate.trim();
+        }
+      } else if (typeof raw === 'string' && raw.trim()) {
+        eventType = raw.trim();
+      }
+
+      if (eventType === 'pong') {
+        handlePong();
+      } else if (eventType === 'ping') {
+        sendRealtimeMessage({ type: 'pong', ts: Date.now() }, { enqueue: false });
+      }
+
+      dispatchRealtimeEvent({
+        type: eventType,
+        payload: parsedPayload,
+        raw,
+        receivedAt: Date.now(),
+      });
+    },
+    [dispatchRealtimeEvent, handlePong, sendRealtimeMessage, isMountedRef]
+  );
+
+  const startHeartbeat = useCallback(
+    (socket) => {
+      clearHeartbeatTimers();
+      if (typeof window === 'undefined') {
+        return;
+      }
+      if (!socket || socket.readyState !== WEBSOCKET_READY_STATE.OPEN) {
+        return;
+      }
+
+      const sendPing = () => {
+        const currentSocket = websocketRef.current;
+        if (
+          !currentSocket ||
+          currentSocket !== socket ||
+          currentSocket.readyState !== WEBSOCKET_READY_STATE.OPEN
+        ) {
+          return;
+        }
+
+        const now = Date.now();
+        lastPingTimestampRef.current = now;
+
+        try {
+          currentSocket.send(
+            JSON.stringify({
+              type: 'ping',
+              ts: now,
+            })
+          );
+        } catch (error) {
+          console.warn('No se pudo enviar el ping de heartbeat:', error);
+          return;
+        }
+
+        if (heartbeatTimeoutRef.current !== null) {
+          window.clearTimeout(heartbeatTimeoutRef.current);
+        }
+        heartbeatTimeoutRef.current = window.setTimeout(() => {
+          heartbeatTimeoutRef.current = null;
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            isOnline: false,
+            lastError: 'Heartbeat timeout',
+          }));
+          try {
+            currentSocket.close(4000, 'Heartbeat timeout');
+          } catch (closeError) {
+            console.warn('Error al cerrar el WebSocket tras heartbeat timeout:', closeError);
+          }
+        }, HEARTBEAT_TIMEOUT_MS);
+      };
+
+      sendPing();
+      heartbeatIntervalRef.current = window.setInterval(sendPing, HEARTBEAT_INTERVAL_MS);
+    },
+    [clearHeartbeatTimers, updateRealtimeInfo]
+  );
+
+  const scheduleReconnect = useCallback(
+    (reason, retryFn) => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+      if (manualDisconnectRef.current || !jwtRef.current) {
+        return;
+      }
+      if (reconnectTimeoutRef.current !== null) {
+        return;
+      }
+
+      reconnectAttemptsRef.current += 1;
+      const attemptNumber = reconnectAttemptsRef.current;
+      const delay = Math.min(
+        RECONNECT_MAX_DELAY_MS,
+        RECONNECT_INITIAL_DELAY_MS * Math.pow(2, Math.max(0, attemptNumber - 1))
+      );
+
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        status: 'reconnecting',
+        isOnline: false,
+        lastError: reason || previous.lastError,
+      }));
+
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        if (manualDisconnectRef.current || !jwtRef.current) {
+          return;
+        }
+        if (typeof retryFn === 'function') {
+          retryFn();
+        }
+      }, delay);
+    },
+    [updateRealtimeInfo]
+  );
+
+  const openSocket = useCallback(
+    async ({ manual = false } = {}) => {
+      if (typeof window === 'undefined' || typeof window.WebSocket === 'undefined') {
+        if (isMountedRef.current) {
+          const message = 'La API de WebSocket no está disponible en este entorno';
+          setWebsocketError(message);
+          setWebsocketStatus('error');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'error',
+            isOnline: false,
+            lastError: message,
+          }));
+        }
+        return null;
+      }
+
+      const token = (jwtRef.current || '').trim();
+      if (!token) {
+        if (isMountedRef.current) {
+          const message = 'No hay token disponible para abrir el WebSocket';
+          setWebsocketError(message);
+          setWebsocketStatus('idle');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'idle',
+            isOnline: false,
+            lastError: message,
+          }));
+        }
+        return null;
+      }
+
+      const existingSocket = websocketRef.current;
+      if (
+        existingSocket &&
+        (existingSocket.readyState === WEBSOCKET_READY_STATE.OPEN ||
+          existingSocket.readyState === WEBSOCKET_READY_STATE.CONNECTING)
+      ) {
+        return existingSocket;
+      }
+
+      if (websocketConnectingRef.current) {
+        return websocketRef.current;
+      }
+
+      websocketConnectingRef.current = true;
+      const attemptId = websocketAttemptRef.current + 1;
+      websocketAttemptRef.current = attemptId;
+
+      if (manual) {
+        reconnectAttemptsRef.current = 0;
+        manualDisconnectRef.current = false;
+      }
+
+      clearReconnectTimeout();
+
+      if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
+        setWebsocketError(null);
+        setWebsocketStatus('registering');
+        setWebsocketLastMessage(null);
+        updateRealtimeInfo((previous) => ({
+          ...previous,
+          status: 'registering',
+          lastError: null,
+        }));
+      }
+
+      const httpBase = normalizeBackendBase(browserUrlRef.current);
+      let registrationPayload = null;
+
+      try {
+        const response = await fetch(`${httpBase}/websockets/connection`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          credentials: 'include',
+        });
+
+        try {
+          registrationPayload = await response.json();
+        } catch (_) {
+          registrationPayload = null;
+        }
+
+        if (!response.ok) {
+          const detail =
+            (registrationPayload && (registrationPayload.detail || registrationPayload.message)) ||
+            `Error al registrar la conexión (HTTP ${response.status})`;
+          throw new Error(detail);
+        }
+
+        if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
+          setWebsocketRegistration(registrationPayload);
+          setWebsocketStatus('connecting');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'connecting',
+          }));
+          dispatchRealtimeEvent({
+            type: 'connection.registered',
+            payload: registrationPayload,
+            raw: null,
+            receivedAt: Date.now(),
+          });
+        }
+
+        const wsUrl = buildWebSocketUrl(httpBase, token);
+        const socket = new window.WebSocket(wsUrl);
+        websocketRef.current = socket;
+
+        if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
+          setWebsocket(socket);
+        }
+
+        socket.onopen = () => {
+          if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
+            try {
+              socket.close(1000, 'Intento de conexión WebSocket obsoleto');
+            } catch (_) {
+              /* ignore */
+            }
+            return;
+          }
+          websocketConnectingRef.current = false;
+          reconnectAttemptsRef.current = 0;
+          manualDisconnectRef.current = false;
+
+          setWebsocketStatus('open');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'open',
+            isOnline: true,
+            lastError: null,
+          }));
+
+          startHeartbeat(socket);
+          flushOfflineQueue();
+          dispatchRealtimeEvent({
+            type: 'connection.open',
+            payload: {
+              registration: registrationPayload,
+            },
+            raw: null,
+            receivedAt: Date.now(),
+          });
+        };
+
+        socket.onmessage = (event) => {
+          if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
+            return;
+          }
+          handleIncomingMessage(event.data);
+        };
+
+        socket.onerror = (event) => {
+          if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
+            return;
+          }
+          console.warn('WebSocket error:', event);
+          const message = 'Ocurrió un error en la conexión WebSocket';
+          setWebsocketError(message);
+          setWebsocketStatus('error');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'error',
+            isOnline: false,
+            lastError: message,
+          }));
+          dispatchRealtimeEvent({
+            type: 'connection.error',
+            payload: {
+              message,
+            },
+            raw: null,
+            receivedAt: Date.now(),
+          });
+        };
+
+        socket.onclose = (event) => {
+          if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
+            return;
+          }
+
+          clearHeartbeatTimers();
+
+          const reason =
+            event.reason ||
+            (event.code === 1000 ? 'Conexión WebSocket cerrada' : `Conexión WebSocket cerrada (código ${event.code})`);
+
+          if (event.code !== 1000 || !event.wasClean) {
+            setWebsocketError(reason);
+          }
+
+          setWebsocket(null);
+          websocketRef.current = null;
+          setWebsocketRegistration(null);
+
+          dispatchRealtimeEvent({
+            type: 'connection.closed',
+            payload: {
+              code: event.code,
+              reason,
+              wasClean: event.wasClean,
+            },
+            raw: null,
+            receivedAt: Date.now(),
+          });
+
+          const wasManual = manualDisconnectRef.current;
+          if (wasManual) {
+            manualDisconnectRef.current = false;
+            setWebsocketStatus('idle');
+            updateRealtimeInfo((previous) => ({
+              ...previous,
+              status: 'idle',
+              isOnline: false,
+              lastError: null,
+            }));
+            return;
+          }
+
+          setWebsocketStatus('closed');
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'closed',
+            isOnline: false,
+            lastError: reason,
+          }));
+
+          scheduleReconnect(reason, () => {
+            openSocket({ manual: false }).catch((error) => {
+              console.warn('Error durante la reconexión WebSocket:', error);
+            });
+          });
+        };
+
+        return socket;
+      } catch (error) {
+        if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
+          const message = error?.message || 'No fue posible establecer la conexión WebSocket';
+          setWebsocketError(message);
+          setWebsocketStatus('error');
+          setWebsocket(null);
+          websocketRef.current = null;
+          setWebsocketRegistration(null);
+          updateRealtimeInfo((previous) => ({
+            ...previous,
+            status: 'error',
+            isOnline: false,
+            lastError: message,
+          }));
+          dispatchRealtimeEvent({
+            type: 'connection.error',
+            payload: {
+              message,
+            },
+            raw: null,
+            receivedAt: Date.now(),
+          });
+        }
+
+        scheduleReconnect(error?.message, () => {
+          openSocket({ manual: false }).catch((innerError) => {
+            console.warn('Error durante la reconexión WebSocket:', innerError);
+          });
+        });
+
+        throw error;
+      } finally {
+        if (websocketAttemptRef.current === attemptId) {
+          websocketConnectingRef.current = false;
+        }
+      }
+    },
+    [
+      clearHeartbeatTimers,
+      clearReconnectTimeout,
+      dispatchRealtimeEvent,
+      flushOfflineQueue,
+      handleIncomingMessage,
+      scheduleReconnect,
+      startHeartbeat,
+      updateRealtimeInfo,
+    ]
+  );
+
   const disconnectWebsocket = useCallback(() => {
+    manualDisconnectRef.current = true;
     websocketAttemptRef.current += 1;
     websocketConnectingRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    clearReconnectTimeout();
+    clearHeartbeatTimers();
 
     const socket = websocketRef.current;
     websocketRef.current = null;
@@ -274,7 +991,11 @@ export const SessionProvider = ({ children }) => {
       } catch (error) {
         console.warn('Error while closing WebSocket:', error);
       }
+    } else {
+      manualDisconnectRef.current = false;
     }
+
+    offlineQueueRef.current = [];
 
     if (isMountedRef.current) {
       setWebsocket(null);
@@ -282,163 +1003,103 @@ export const SessionProvider = ({ children }) => {
       setWebsocketError(null);
       setWebsocketLastMessage(null);
       setWebsocketRegistration(null);
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        status: 'idle',
+        isOnline: false,
+        lastError: null,
+        queueLength: 0,
+        lastHeartbeatAt: null,
+        latency: null,
+      }));
     }
-  }, []);
+  }, [clearHeartbeatTimers, clearReconnectTimeout, updateRealtimeInfo]);
 
-  const connectWebsocket = useCallback(async () => {
-    if (typeof window === 'undefined' || typeof window.WebSocket === 'undefined') {
-      if (isMountedRef.current) {
-        setWebsocketError('La API de WebSocket no está disponible en este entorno');
-        setWebsocketStatus('error');
+  const connectWebsocket = useCallback(() => openSocket({ manual: true }), [openSocket]);
+
+  const sendWebsocketMessage = useCallback(
+    (payload) => {
+      const result = sendRealtimeMessage(payload, { enqueue: false });
+      return result.ok;
+    },
+    [sendRealtimeMessage]
+  );
+
+  const ensureRealtimeConnection = useCallback(() => openSocket({ manual: false }), [openSocket]);
+
+  const realtimeValue = useMemo(
+    () => ({
+      status: realtimeInfo.status,
+      isOnline: realtimeInfo.isOnline,
+      lastError: realtimeInfo.lastError,
+      lastEvent: realtimeInfo.lastEvent,
+      queueLength: realtimeInfo.queueLength,
+      latency: realtimeInfo.latency,
+      lastHeartbeatAt: realtimeInfo.lastHeartbeatAt,
+      send: sendRealtimeMessage,
+      ensureConnection: ensureRealtimeConnection,
+      disconnect: disconnectWebsocket,
+      subscribe: subscribeToRealtime,
+    }),
+    [
+      disconnectWebsocket,
+      ensureRealtimeConnection,
+      realtimeInfo,
+      sendRealtimeMessage,
+      subscribeToRealtime,
+    ]
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleOnline = () => {
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        lastError: null,
+      }));
+
+      const socket = websocketRef.current;
+      if (
+        !socket ||
+        socket.readyState === WEBSOCKET_READY_STATE.CLOSED ||
+        socket.readyState === WEBSOCKET_READY_STATE.CLOSING
+      ) {
+        ensureRealtimeConnection().catch((error) => {
+          console.warn('Error al reconectar tras recuperar la red:', error);
+        });
       }
-      return null;
+    };
+
+    const handleOffline = () => {
+      clearHeartbeatTimers();
+      updateRealtimeInfo((previous) => ({
+        ...previous,
+        isOnline: false,
+        status: 'offline',
+        lastError: 'Sin conexión a internet',
+      }));
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [clearHeartbeatTimers, ensureRealtimeConnection, updateRealtimeInfo]);
+
+  useEffect(() => {
+    if (!jwt) {
+      return;
     }
-
-    const token = (jwtRef.current || '').trim();
-    if (!token) {
-      if (isMountedRef.current) {
-        setWebsocketError('No hay token disponible para abrir el WebSocket');
-        setWebsocketStatus('idle');
-      }
-      return null;
-    }
-
-    const currentSocket = websocketRef.current;
-    if (
-      currentSocket &&
-      (currentSocket.readyState === WEBSOCKET_READY_STATE.OPEN ||
-        currentSocket.readyState === WEBSOCKET_READY_STATE.CONNECTING)
-    ) {
-      return currentSocket;
-    }
-
-    if (websocketConnectingRef.current) {
-      return websocketRef.current;
-    }
-
-    websocketConnectingRef.current = true;
-    const attemptId = websocketAttemptRef.current + 1;
-    websocketAttemptRef.current = attemptId;
-
-    const httpBase = normalizeBackendBase(browserUrl);
-
-    if (isMountedRef.current) {
-      setWebsocketError(null);
-      setWebsocketStatus('registering');
-      setWebsocketLastMessage(null);
-    }
-
-    let registrationPayload = null;
-
-    try {
-      const response = await fetch(`${httpBase}/websockets/connection`, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        credentials: 'include',
-      });
-
-      try {
-        registrationPayload = await response.json();
-      } catch (_) {
-        registrationPayload = null;
-      }
-
-      if (!response.ok) {
-        const detail =
-          (registrationPayload && (registrationPayload.detail || registrationPayload.message)) ||
-          `Error al registrar la conexión (HTTP ${response.status})`;
-        throw new Error(detail);
-      }
-
-      if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
-        setWebsocketRegistration(registrationPayload);
-        setWebsocketStatus('connecting');
-      }
-
-      const wsUrl = buildWebSocketUrl(httpBase, token);
-      const socket = new window.WebSocket(wsUrl);
-      websocketRef.current = socket;
-
-      if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
-        setWebsocket(socket);
-      }
-
-      socket.onopen = () => {
-        if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
-          try {
-            socket.close(1000, 'Intento de conexión WebSocket obsoleto');
-          } catch (_) {
-            /* ignore */
-          }
-          return;
-        }
-        websocketConnectingRef.current = false;
-        setWebsocketStatus('open');
-      };
-
-      socket.onmessage = (event) => {
-        if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
-          return;
-        }
-        setWebsocketLastMessage(event.data);
-      };
-
-      socket.onerror = (event) => {
-        if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
-          return;
-        }
-        console.warn('WebSocket error:', event);
-        setWebsocketError('Ocurrió un error en la conexión WebSocket');
-        setWebsocketStatus('error');
-      };
-
-      socket.onclose = (event) => {
-        if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
-          return;
-        }
-        if (event.code !== 1000 || !event.wasClean) {
-          setWebsocketError(event.reason || `Conexión WebSocket cerrada (código ${event.code})`);
-        }
-        setWebsocketStatus('closed');
-        setWebsocket(null);
-        websocketRef.current = null;
-      };
-
-      return socket;
-    } catch (error) {
-      if (isMountedRef.current && websocketAttemptRef.current === attemptId) {
-        setWebsocketError(error?.message || 'No fue posible establecer la conexión WebSocket');
-        setWebsocketStatus('error');
-        setWebsocket(null);
-        websocketRef.current = null;
-        setWebsocketRegistration(null);
-      }
-      throw error;
-    } finally {
-      if (websocketAttemptRef.current === attemptId) {
-        websocketConnectingRef.current = false;
-      }
-    }
-  }, [browserUrl]);
-
-  const sendWebsocketMessage = useCallback((payload) => {
-    const socket = websocketRef.current;
-    if (!socket || socket.readyState !== WEBSOCKET_READY_STATE.OPEN) {
-      return false;
-    }
-
-    try {
-      const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
-      socket.send(message);
-      return true;
-    } catch (error) {
-      console.warn('No se pudo enviar el mensaje por WebSocket:', error);
-      return false;
-    }
-  }, []);
+    ensureRealtimeConnection().catch((error) => {
+      console.warn('No fue posible iniciar el WebSocket automáticamente:', error);
+    });
+  }, [ensureRealtimeConnection, jwt]);
 
   useEffect(() => {
     if (!jwt) {
@@ -470,6 +1131,7 @@ export const SessionProvider = ({ children }) => {
       connectWebsocket,
       disconnectWebsocket,
       sendWebsocketMessage,
+      realtime: realtimeValue,
     }),
     [
       browserUrl,
@@ -477,6 +1139,7 @@ export const SessionProvider = ({ children }) => {
       disconnectWebsocket,
       isSessionReady,
       jwt,
+      realtimeValue,
       sendWebsocketMessage,
       setBrowserUrl,
       setJwt,
@@ -490,7 +1153,13 @@ export const SessionProvider = ({ children }) => {
     ]
   );
 
-  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+  return (
+    <SessionContext.Provider value={value}>
+      <RealtimeContext.Provider value={realtimeValue}>{children}</RealtimeContext.Provider>
+    </SessionContext.Provider>
+  );
 };
 
 export const useSession = () => useContext(SessionContext);
+
+export const useRealtime = () => useContext(RealtimeContext);
