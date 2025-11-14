@@ -543,15 +543,6 @@ export const Chat = () => {
   }, [jwt, resetHistoryState, setActiveChatInStore]);
 
   useEffect(() => {
-    if (!jwt) {
-      return;
-    }
-    connectWebsocket().catch((error) => {
-      console.warn('No fue posible iniciar el WebSocket:', error);
-    });
-  }, [connectWebsocket, jwt]);
-
-  useEffect(() => {
     const chatIdRaw = activeChat?.id;
 
     const leaveChat = (targetId, options = {}) => {

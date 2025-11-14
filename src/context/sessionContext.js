@@ -562,10 +562,23 @@ export const SessionProvider = ({ children }) => {
         eventType = raw.trim();
       }
 
-      if (eventType === 'pong') {
+      const eventTypeLower = typeof eventType === 'string' ? eventType.toLowerCase() : '';
+
+      if (eventTypeLower === 'pong' || eventTypeLower === 'system.pong') {
         handlePong();
-      } else if (eventType === 'ping') {
-        sendRealtimeMessage({ type: 'pong', ts: Date.now() }, { enqueue: false });
+      } else if (eventTypeLower === 'ping' || eventTypeLower === 'system.ping') {
+        const pingId =
+          parsedPayload?.ping_id ??
+          parsedPayload?.pingId ??
+          parsedPayload?.payload?.ping_id ??
+          parsedPayload?.payload?.pingId ??
+          null;
+        const pongPayload = {
+          type: 'system.pong',
+          ping_id: pingId || undefined,
+          client_timestamp: Date.now(),
+        };
+        sendRealtimeMessage(pongPayload, { enqueue: false });
       }
 
       dispatchRealtimeEvent({
@@ -837,7 +850,9 @@ export const SessionProvider = ({ children }) => {
           if (!isMountedRef.current || websocketAttemptRef.current !== attemptId) {
             return;
           }
-          console.warn('WebSocket error:', event);
+          if (typeof console !== 'undefined') {
+            console.warn('WebSocket error:', event);
+          }
           const message = 'Ocurrió un error en la conexión WebSocket';
           setWebsocketError(message);
           setWebsocketStatus('error');
@@ -867,6 +882,18 @@ export const SessionProvider = ({ children }) => {
           const reason =
             event.reason ||
             (event.code === 1000 ? 'Conexión WebSocket cerrada' : `Conexión WebSocket cerrada (código ${event.code})`);
+
+          if (typeof console !== 'undefined') {
+            console.warn(
+              'WebSocket closed',
+              {
+                code: event.code,
+                reason: event.reason,
+                wasClean: event.wasClean,
+              },
+              reason
+            );
+          }
 
           if (event.code !== 1000 || !event.wasClean) {
             setWebsocketError(reason);
@@ -1107,12 +1134,19 @@ export const SessionProvider = ({ children }) => {
     }
   }, [jwt, disconnectWebsocket]);
 
-  useEffect(
-    () => () => {
-      disconnectWebsocket();
-    },
-    [disconnectWebsocket]
+  const skipFirstCleanupRef = useRef(
+    typeof process !== 'undefined' && process.env.NODE_ENV !== 'production'
   );
+
+  useEffect(() => {
+    return () => {
+      if (skipFirstCleanupRef.current) {
+        skipFirstCleanupRef.current = false;
+        return;
+      }
+      disconnectWebsocket();
+    };
+  }, [disconnectWebsocket]);
 
   const value = useMemo(
     () => ({
